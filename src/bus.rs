@@ -1,17 +1,21 @@
+use crossbeam::channel::{self, Receiver, Sender};
+
+pub type BusChannel<T> = (Sender<T>, Receiver<T>);
+
 #[allow(dead_code)]
-pub(crate) struct Bus {
-    tx: std::sync::mpsc::SyncSender<()>,
-    rx: std::sync::mpsc::Receiver<()>,
+pub(crate) struct Bus<T> {
+    pub tx: channel::Sender<T>,
+    pub rx: channel::Receiver<T>,
 }
 
 #[allow(dead_code)]
-impl Bus {
+impl<T> Bus<T> {
     pub fn new(size: usize) -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel(size);
+        let (tx, rx) = channel::bounded(size);
         Self { tx, rx }
     }
 
-    pub fn sender(&self) -> std::sync::mpsc::SyncSender<()> {
-        self.tx.clone()
+    pub fn clone(&self) -> BusChannel<T> {
+        (self.tx.clone(), self.rx.clone())
     }
 }
