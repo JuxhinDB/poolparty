@@ -1,9 +1,6 @@
-use std::{
-    collections::VecDeque,
-    fmt::Debug,
-    sync::mpsc::{self, Receiver, Sender},
-    thread,
-};
+use std::{collections::VecDeque, fmt::Debug, thread};
+
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 // NOTE(jdb): This is just a temporary alias to signal that we want messages
 // to always contain their Pid -- which ideally can be either a usize (local),
@@ -21,7 +18,12 @@ pub struct Supervisor<W: Worker> {
     // workers even as they are running.
     checked: VecDeque<(Pid, Sender<Message<W::Task>>)>,
 
-    queue: VecDeque<W::Task>,
+    queue: (Sender<W::Task>, Receiver<W::Task>),
+
+    // Receiver end of the channel between all workers and the supervisor. This
+    // allows workers to emit messages back to the supervisor efficiently.
+    receiver: Receiver<(Pid, Message<W::Task>)>,
+
     size: usize,
 }
 
@@ -39,29 +41,32 @@ pub trait Worker: Send {
     // the channel to determine the next course of action.
     //
     // FIXME(jdb): This should be fallible
-    fn spawn(id: usize, rx: Receiver<Message<Self::Task>>);
+    fn spawn(id: usize, tx: Sender<(Pid, Message<Self::Task>)>, rx: Receiver<Message<Self::Task>>);
 }
 
 #[allow(dead_code)]
 impl<W: Worker> Supervisor<W> {
     fn new(size: usize) -> Self {
+        // FIXME(jdb): Channel sizes should be configurable
         let mut pool = VecDeque::with_capacity(size);
+        let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
         for id in 0..size {
-            let (tx, rx) = mpsc::channel();
-            W::spawn(id, rx);
+            let (tx, rx) = mpsc::channel(1024);
+            W::spawn(id, supervisor_tx.clone(), rx);
             pool.push_front((id, tx));
         }
 
         Self {
             pool,
             checked: VecDeque::with_capacity(size),
-            queue: VecDeque::new(),
+            queue: mpsc::channel(1024),
+            receiver: supervisor_rx,
             size,
         }
     }
 
-    fn run(&mut self) {
+    async fn run(&mut self) {
         // Start running the supervisor manage worker lifecycle
         //
         // This method will continuously check the task queue and assign tasks
@@ -71,33 +76,58 @@ impl<W: Worker> Supervisor<W> {
         // Dynamically spawn workers if the pool is not at full capacity when
         // tasks are enqueued.
         loop {
-            if let Some(task) = self.queue.pop_back() {
-                // We want to check if there is a worker available in the pool,
-                // if not we have two options:
-                //
-                // 1. Spawn a new worker if we are within capacity limits;
-                // 2. Wait until the next worker is available.
-                if let Some(worker) = self.pool.pop_front() {
-                    // Let's try to find a worker
-                    let msg = Message::Request(Request::Task(task));
-                    println!("supervisor sent msg: {msg:?}");
+            tokio::select! {
+                // NOTE(jdb): Consider `biased;` polling to make sure that
+                // noisy workers do not prevent tasks from being enqueued.
 
-                    // We should only work with Workers that are available. If the receiver
-                    // has dropped, then we should drop this worker entirely from the pool.
-                    //
-                    // This _couold_ lead to
-                    if worker.1.send(msg).is_ok() {
-                        // Move the worker to the checked out pool so that the channel
-                        // remains open.
-                        self.checked.push_front(worker);
+                // New task has been enqueued
+                task = self.queue.1.recv() => {
+                    match task {
+                        Some(task) => {
+                            // We want to check if there is a worker available in the pool,
+                            // if not we have two options:
+                            //
+                            // 1. Spawn a new worker if we are within capacity limits;
+                            // 2. Wait until the next worker is available.
+                            if let Some(worker) = self.pool.pop_front() {
+                                // Let's try to find a worker
+                                let msg = Message::Request(Request::Task(task));
+                                println!("supervisor sent msg: {msg:?}");
+
+                                // We should only work with Workers that are available. If the receiver
+                                // has dropped, then we should drop this worker entirely from the pool.
+                                //
+                                // This _couold_ lead to
+                                if worker.1.send(msg).await.is_ok() {
+                                    // Move the worker to the checked out pool so that the channel
+                                    // remains open.
+                                    self.checked.push_front(worker);
+                                }
+                            }
+                        },
+                        None => {
+                            eprintln!("internal task queue closed unexpectedly");
+                        }
+                    }
+                },
+                // Received a message from one of our workers
+                msg = self.receiver.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            println!("received msg from worker: {msg:?}");
+                        },
+                        None => {
+                            eprintln!("no workers running, which should not happen");
+                        }
                     }
                 }
-            }
+            };
         }
     }
 
-    fn enqueue(&mut self, task: W::Task) {
-        self.queue.push_back(task);
+    async fn enqueue(&mut self, task: W::Task) {
+        // FIXME(jdb): Add internal errors
+        let _ = self.queue.0.send(task).await;
     }
 
     fn shutdown(&self) {
@@ -131,18 +161,18 @@ impl Worker for TestWorker {
     type Output = ();
     type Error = &'static str;
 
-    fn spawn(id: usize, rx: Receiver<Message<Self::Task>>) {
-        thread::spawn(move || {
-            let worker = Self { id, rx };
+    fn spawn(id: usize, tx: Sender<(Pid, Message<Self::Task>)>, rx: Receiver<Message<Self::Task>>) {
+        tokio::spawn(async move {
+            let mut worker = Self { id, rx };
 
             loop {
-                match worker.rx.recv() {
-                    Ok(msg) => {
-                        println!("got msg: {msg:?}");
-                    }
-                    Err(e) => {
-                        eprintln!("{e}");
-                    }
+                if let Some(msg) = worker.rx.recv().await {
+                    let response = format!("got msg: {msg:?}");
+
+                    // FIXME(jdb): Add internal error
+                    let _ = tx
+                        .send((worker.id, Message::Response(Response::State(response))))
+                        .await;
                 }
             }
         });
@@ -163,21 +193,21 @@ pub enum Request<T: Task> {
 
 #[derive(Debug)]
 pub enum Response {
-    State(bool),
+    State(String),
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    #[test]
-    fn usage_test() {
+    #[tokio::test]
+    async fn usage_test() {
         let mut pool: Supervisor<TestWorker> = Supervisor::new(5);
         let task = TestWorkerTask {
             ctx: "test-worker".to_string(),
         };
 
-        pool.enqueue(task);
-        pool.run();
+        pool.enqueue(task).await;
+        pool.run().await;
     }
 }
