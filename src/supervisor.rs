@@ -1,42 +1,59 @@
 use crate::{
-    message::{Message, Request},
-    worker::Worker,
+    message::{Request, Response},
+    worker::{Workable, Worker},
     Pid,
 };
 use std::collections::VecDeque;
 
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::{
+    sync::mpsc::{self, Receiver, Sender},
+    task::JoinHandle,
+};
 
-pub struct Supervisor<W: Worker> {
+// Internal type alias holding the context needed to communicate
+// as well as abort tasks.
+//
+// NOTE(jdb): It's unclear, design-wise, if we want to rely on the tokio
+// `JoinHandle`. This will make running workers across network much more
+// difficult and goes against the design-idea of the library.
+type WorkerHandle<W: Workable> = (Pid, Sender<Request<W>>, JoinHandle<()>);
+
+#[allow(dead_code)]
+pub struct Supervisor<W: Workable> {
     // Internal worker pool, containing the queue of workers that are ready
     // to receive a task (i.e., checkout).
-    pool: VecDeque<(Pid, Sender<Message<W::Task>>)>,
+    pool: VecDeque<WorkerHandle<W>>,
 
     // An internal pool containing the list of checked out workers. We need
     // to do this in order to keep channels alive and keep communication with
     // workers even as they are running.
-    checked: VecDeque<(Pid, Sender<Message<W::Task>>)>,
+    checked: VecDeque<WorkerHandle<W>>,
 
+    // Queue of Tasks to be sent out.
     queue: (Sender<W::Task>, Receiver<W::Task>),
 
     // Receiver end of the channel between all workers and the supervisor. This
     // allows workers to emit messages back to the supervisor efficiently.
-    receiver: Receiver<(Pid, Message<W::Task>)>,
+    receiver: Receiver<(Pid, Response<W>)>,
 
     size: usize,
 }
 
 #[allow(dead_code)]
-impl<W: Worker> Supervisor<W> {
+impl<W: Workable + 'static> Supervisor<W> {
     pub fn new(size: usize) -> Self {
-        // FIXME(jdb): Channel sizes should be configurable
         let mut pool = VecDeque::with_capacity(size);
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
         for id in 0..size {
+            let supervisor_tx = supervisor_tx.clone();
             let (tx, rx) = mpsc::channel(1024);
-            W::spawn(id, supervisor_tx.clone(), rx);
-            pool.push_front((id, tx));
+
+            let handle = tokio::spawn(async move {
+                Worker::new(id, supervisor_tx.clone(), rx).run().await;
+            });
+
+            pool.push_front((id, tx, handle));
         }
 
         Self {
@@ -73,8 +90,7 @@ impl<W: Worker> Supervisor<W> {
                             // 2. Wait until the next worker is available.
                             if let Some(worker) = self.pool.pop_front() {
                                 // Let's try to find a worker
-                                let msg = Message::Request(Request::Task(task));
-                                println!("supervisor sent msg: {msg:?}");
+                                let msg = Request::Task(task);
 
                                 // We should only work with Workers that are available. If the receiver
                                 // has dropped, then we should drop this worker entirely from the pool.

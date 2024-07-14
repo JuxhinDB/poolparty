@@ -1,18 +1,21 @@
 use std::{fmt::Debug, future::Future, marker::PhantomData};
 
-use crate::Pid;
+use crate::{
+    message::{Request, Response},
+    Pid,
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 pub trait Task: Send + Debug {}
 
 /// A long-lived Worker/Actor that is sent tasks to execute and emit back events
 /// to be handled by the supervisor.
-pub trait Workable: Send + Sized {
+pub trait Workable: Debug + Send + Sync + Sized {
     //  In the future, we may consider a way to reuse the existing worker
     //  by restarting it with the same task with a clean context.
     type Task: Task + Debug;
-    type Output;
-    type Error;
+    type Output: Debug + Send;
+    type Error: Debug + Send;
 
     fn process(task: Self::Task) -> impl Future<Output = Response<Self>>;
 }
@@ -25,7 +28,7 @@ pub struct Worker<'a, W: Workable> {
 }
 
 impl<'a, W: Workable> Worker<'a, W> {
-    fn new(id: usize, tx: Sender<(Pid, Response<W>)>, rx: Receiver<Request<W>>) -> Self {
+    pub fn new(id: usize, tx: Sender<(Pid, Response<W>)>, rx: Receiver<Request<W>>) -> Self {
         Self {
             id,
             rx,
@@ -34,34 +37,74 @@ impl<'a, W: Workable> Worker<'a, W> {
         }
     }
 
-    async fn run(mut self) {
+    fn handle_event(&mut self, event: Request<W>) -> Result<(), String> {
+        match self.state.next(event) {
+            Ok(state) => {
+                // We've successfully transitioned our state and
+                // should handle the transition accordingly. I don't
+                // quite like how the state handling is split up,
+                // it's really ugly. But we make it work first, then
+                // we make it fast/pretty.
+                match &state {
+                    State::Running { task } => {
+                        // TODO(jdb): Run the task
+                        println!("running task {task:?}");
+                    }
+                    State::Idle => {
+                        // Do nothing, wait for a new task
+                    }
+                    State::Error(err) => {
+                        // Something bad happened
+                        eprintln!("error during execution: {err:?}");
+                    }
+                    State::Stop => {
+                        return Ok(());
+                    }
+                }
+
+                // NOTE(jdb): This is code smell, as we should be
+                // transitioning the state before anything else.
+                //
+                // I need to figure out how to enable the mutation
+                // of this field without moving. Projection might
+                // not work here due to unsized enum variants
+                self.state = state;
+
+                Ok(())
+            }
+            Err(invalid_transition) => {
+                // FIXME(jdb): Propagate error
+                eprintln!("err: {invalid_transition:?}, skipping message");
+
+                Err(invalid_transition)
+            }
+        }
+    }
+
+    pub async fn run(mut self) {
         loop {
-            if let Some(_msg) = self.rx.recv().await {
-                todo!()
+            tokio::select! {
+                Some(event) = self.rx.recv() => {
+                    println!("received event {event:?}");
+
+                    if self.handle_event(event).is_ok() {
+                        println!("transitioned to state {state:?}", state = self.state);
+                    }
+                }
+                else => {
+                    eprintln!("channel closed unexpectedly");
+                }
             }
         }
     }
 }
 
+#[derive(Debug)]
 enum State<W: Workable> {
     Idle,
     Running { task: W::Task },
     Error(W::Error),
     Stop,
-}
-
-#[derive(Debug)]
-pub enum Request<W: Workable> {
-    State,
-    Task(W::Task),
-    Complete(Result<W::Output, W::Error>),
-    Cancel,
-    Shutdown,
-}
-
-#[derive(Debug)]
-pub enum Response<W: Workable> {
-    Complete(Result<W::Output, W::Error>),
 }
 
 impl<W: Workable> State<W> {
@@ -90,22 +133,14 @@ impl<W: Workable> State<W> {
     //  the worker, and spawn a new one with the same task. This is done to
     //  ensure that we are able to capture error state before terminating a
     //  worker.
-    fn next(self, event: Request<W>) -> Result<State<W>, String> {
+    fn next(&self, event: Request<W>) -> Result<State<W>, String> {
         match (self, event) {
             (State::Idle, Request::Task(t)) => Ok(State::Running { task: t }),
             (State::Idle, Request::Cancel) => Ok(State::Idle),
-            (State::Running { task: _ }, Request::Complete(result)) => match result {
-                Ok(_output) => Ok(State::Idle),
-                Err(error) => Ok(State::Error(error)),
-            },
             (State::Running { task: _ }, Request::Cancel) => Ok(State::Idle),
             (_, Request::Shutdown) => Ok(State::Stop),
             _ => Err("invalid transition".to_string()),
         }
-    }
-
-    fn state<'a>(&'a self) -> &'a State<W> {
-        self
     }
 }
 
