@@ -56,6 +56,15 @@ mod test {
 
         // This task does not get processed yet as the pool size is 1
         pool.enqueue(task).await;
-        pool.run().await;
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("received shutdown signal");
+                pool.shutdown().await;
+            },
+            _ = pool.run() => {
+
+            }
+        }
     }
 }

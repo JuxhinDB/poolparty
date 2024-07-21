@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 
 // Internal type alias holding the context needed to communicate
@@ -128,10 +128,24 @@ impl<W: Workable + 'static> Supervisor<W> {
         let _ = self.queue.0.send(task).await;
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(self) {
         // Emit a cancellation message and wait for all the
         // workers to ack or timeout.
-        unimplemented!()
+        println!("shutting down supervisor");
+        let mut shutdowns = JoinSet::new();
+        let checked_len = self.checked.capacity();
+
+        for worker in self.checked.into_iter() {
+            shutdowns.spawn(async move { worker.1.send(Request::Shutdown).await });
+        }
+
+        let mut results = Vec::with_capacity(checked_len);
+
+        while let Some(result) = shutdowns.join_next().await {
+            results.push(result);
+        }
+
+        println!("shutdown result {results:?}");
     }
 }
 

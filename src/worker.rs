@@ -58,6 +58,8 @@ impl<'a, W: Workable> Worker<'a, W> {
                         eprintln!("error during execution: {err:?}");
                     }
                     State::Stop => {
+                        // NOTE(jdb): need some `tx` back to supervisor
+                        println!("worker shutting down...");
                         return Ok(());
                     }
                 }
