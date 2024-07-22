@@ -14,5 +14,6 @@ pub enum Request<W: Workable> {
 
 #[derive(Debug)]
 pub enum Response<W: Workable> {
+    ShutdownAck, // Acknowledge shutdown
     Complete(Result<W::Output, W::Error>),
 }

@@ -16,7 +16,7 @@ use tokio::{
 // NOTE(jdb): It's unclear, design-wise, if we want to rely on the tokio
 // `JoinHandle`. This will make running workers across network much more
 // difficult and goes against the design-idea of the library.
-type WorkerHandle<W: Workable> = (Pid, Sender<Request<W>>, JoinHandle<()>);
+type WorkerHandle<W> = (Pid, Sender<Request<W>>, JoinHandle<()>);
 
 #[allow(dead_code)]
 pub struct Supervisor<W: Workable> {

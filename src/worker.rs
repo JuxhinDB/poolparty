@@ -1,4 +1,4 @@
-use std::{fmt::Debug, future::Future, marker::PhantomData};
+use std::{fmt::Debug, future::Future};
 
 use crate::{
     message::{Request, Response},
@@ -13,31 +13,31 @@ pub trait Task: Send + Debug {}
 pub trait Workable: Debug + Send + Sync + Sized {
     //  In the future, we may consider a way to reuse the existing worker
     //  by restarting it with the same task with a clean context.
-    type Task: Task + Debug;
-    type Output: Debug + Send;
-    type Error: Debug + Send;
+    type Task: Task + Send + Debug;
+    type Output: Send + Debug;
+    type Error: Send + Debug;
 
     fn process(task: Self::Task) -> impl Future<Output = Response<Self>>;
 }
 
-pub struct Worker<'a, W: Workable> {
+pub struct Worker<W: Workable> {
     id: usize,
+    tx: Sender<(Pid, Response<W>)>,
     rx: Receiver<Request<W>>,
     state: State<W>,
-    worker: PhantomData<&'a W>,
 }
 
-impl<'a, W: Workable> Worker<'a, W> {
+impl<W: Workable> Worker<W> {
     pub fn new(id: usize, tx: Sender<(Pid, Response<W>)>, rx: Receiver<Request<W>>) -> Self {
         Self {
             id,
+            tx,
             rx,
             state: State::Idle,
-            worker: PhantomData,
         }
     }
 
-    fn handle_event(&mut self, event: Request<W>) -> Result<(), String> {
+    async fn handle_event(&mut self, event: Request<W>) -> Result<(), String> {
         match self.state.next(event) {
             Ok(state) => {
                 // We've successfully transitioned our state and
@@ -47,8 +47,13 @@ impl<'a, W: Workable> Worker<'a, W> {
                 // we make it fast/pretty.
                 match &state {
                     State::Running { task } => {
-                        // TODO(jdb): Run the task
-                        println!("running task {task:?}");
+                        // FIXME(jdb): Right now this blocks the state
+                        // transition until the task is wrong which is
+                        // not right. The issue with this is that we
+                        // are no longer able to listen to messages while
+                        // the task is running (important for task
+                        // cancellation).
+                        W::process(task).await;
                     }
                     State::Idle => {
                         // Do nothing, wait for a new task
@@ -59,8 +64,7 @@ impl<'a, W: Workable> Worker<'a, W> {
                     }
                     State::Stop => {
                         // NOTE(jdb): need some `tx` back to supervisor
-                        println!("worker shutting down...");
-                        return Ok(());
+                        self.tx.send((self.id, Response::ShutdownAck)).await;
                     }
                 }
 
@@ -69,7 +73,7 @@ impl<'a, W: Workable> Worker<'a, W> {
                 //
                 // I need to figure out how to enable the mutation
                 // of this field without moving. Projection might
-                // not work here due to unsized enum variants
+                // not work here due to unsized enum variants.
                 self.state = state;
 
                 Ok(())
@@ -89,12 +93,13 @@ impl<'a, W: Workable> Worker<'a, W> {
                 Some(event) = self.rx.recv() => {
                     println!("received event {event:?}");
 
-                    if self.handle_event(event).is_ok() {
+                    if self.handle_event(event).await.is_ok() {
                         println!("transitioned to state {state:?}", state = self.state);
                     }
                 }
                 else => {
-                    eprintln!("channel closed unexpectedly");
+                    eprintln!("worker channel closed: shutting down");
+                    break;
                 }
             }
         }

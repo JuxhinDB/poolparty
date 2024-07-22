@@ -2,7 +2,7 @@ pub mod message;
 pub mod supervisor;
 pub mod worker;
 
-use std::{fmt::Debug, time::Duration};
+use std::fmt::Debug;
 
 use crate::{
     message::Response,
