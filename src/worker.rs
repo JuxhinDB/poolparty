@@ -6,18 +6,22 @@ use crate::{
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 
-pub trait Task: Send + Debug {}
+// NOTE(jdb): `Clone` bound _seems_ unnecessary. I'm currently including this
+// in order to bypass move issues when matching `self.state` and moving the
+// `State::Running { task }` to `Workable::process`. This needs to be designed
+// better later on.
+pub trait Task: Send + Clone {}
 
 /// A long-lived Worker/Actor that is sent tasks to execute and emit back events
 /// to be handled by the supervisor.
 pub trait Workable: Debug + Send + Sync + Sized {
     //  In the future, we may consider a way to reuse the existing worker
     //  by restarting it with the same task with a clean context.
-    type Task: Task + Send + Debug;
+    type Task: Task + Debug;
     type Output: Send + Debug;
     type Error: Send + Debug;
 
-    fn process(task: Self::Task) -> impl Future<Output = Response<Self>>;
+    fn process(task: Self::Task) -> impl Future<Output = Response<Self>> + Send;
 }
 
 pub struct Worker<W: Workable> {
@@ -37,64 +41,46 @@ impl<W: Workable> Worker<W> {
         }
     }
 
-    async fn handle_event(&mut self, event: Request<W>) -> Result<(), String> {
-        match self.state.next(event) {
-            Ok(state) => {
-                // We've successfully transitioned our state and
-                // should handle the transition accordingly. I don't
-                // quite like how the state handling is split up,
-                // it's really ugly. But we make it work first, then
-                // we make it fast/pretty.
-                match &state {
-                    State::Running { task } => {
-                        // FIXME(jdb): Right now this blocks the state
-                        // transition until the task is wrong which is
-                        // not right. The issue with this is that we
-                        // are no longer able to listen to messages while
-                        // the task is running (important for task
-                        // cancellation).
-                        W::process(task).await;
-                    }
-                    State::Idle => {
-                        // Do nothing, wait for a new task
-                    }
-                    State::Error(err) => {
-                        // Something bad happened
-                        eprintln!("error during execution: {err:?}");
-                    }
-                    State::Stop => {
-                        // NOTE(jdb): need some `tx` back to supervisor
-                        self.tx.send((self.id, Response::ShutdownAck)).await;
-                    }
-                }
-
-                // NOTE(jdb): This is code smell, as we should be
-                // transitioning the state before anything else.
-                //
-                // I need to figure out how to enable the mutation
-                // of this field without moving. Projection might
-                // not work here due to unsized enum variants.
-                self.state = state;
-
-                Ok(())
-            }
-            Err(invalid_transition) => {
-                // FIXME(jdb): Propagate error
-                eprintln!("err: {invalid_transition:?}, skipping message");
-
-                Err(invalid_transition)
-            }
-        }
-    }
-
     pub async fn run(mut self) {
         loop {
             tokio::select! {
                 Some(event) = self.rx.recv() => {
                     println!("received event {event:?}");
 
-                    if self.handle_event(event).await.is_ok() {
+                    if let Ok(state) = self.state.next(event) {
+                        // We've successfully transitioned our state and
+                        // should handle the transition accordingly. I don't
+                        // quite like how the state handling is split up,
+                        // it's really ugly. But we make it work first, then
+                        // we make it fast/pretty.
+                        self.state = state;
+
                         println!("transitioned to state {state:?}", state = self.state);
+                        match &self.state {
+                            State::Running { task } => {
+                                // FIXME(jdb): Right now this blocks the state
+                                // transition until the task is wrong which is
+                                // not right. The issue with this is that we
+                                // are no longer able to listen to messages while
+                                // the task is running (important for task
+                                // cancellation).
+                                let result = W::process(task.clone()).await;
+                                let _ = self.tx.send((self.id, result)).await;
+                            }
+                            State::Idle => {
+                                // Do nothing, wait for a new task
+                            }
+                            State::Error(err) => {
+                                // Something bad happened
+                                eprintln!("error during execution: {err:?}");
+                            }
+                            State::Stop => {
+                                let _ = self.tx.send((self.id, Response::ShutdownAck)).await;
+                            }
+                        }
+                    } else {
+                        eprintln!("invalid transition");
+                        return;
                     }
                 }
                 else => {
@@ -106,6 +92,7 @@ impl<W: Workable> Worker<W> {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum State<W: Workable> {
     Idle,
@@ -115,7 +102,7 @@ enum State<W: Workable> {
 }
 
 impl<W: Workable> State<W> {
-    // NOTE(jdb): The following is the initial state machine for workers.
+    // The following is the initial state machine for workers.
     //
     //                           complete/success
     //                           cancel

@@ -18,10 +18,10 @@ Each worker operates as a state machine with defined states and transitions, ens
 
 ## Checklist of Features/Functionality
 
-- [ ] Basic Worker Pool Structure
+- [x] Basic Worker Pool Structure
 - [ ] Task Queue Implementation
 - [ ] Worker State Machine Design
-- [ ] Bi-directional Communication between Supervisor and Workers
+- [x] Bi-directional Communication between Supervisor and Workers
 - [ ] Worker Lifecycle Management (Spawn, Run, Cancel, Stop)
 - [ ] Error Handling and Recovery
 - [ ] Graceful Shutdown Process

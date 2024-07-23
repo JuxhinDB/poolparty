@@ -17,6 +17,7 @@ pub type Pid = usize;
 #[derive(Debug)]
 struct TestWorker;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct TestTask {
     msg: String,
@@ -34,10 +35,21 @@ impl Workable for TestWorker {
     }
 }
 
+#[derive(Debug)]
+struct ErrorTestWorker;
+
+impl Workable for ErrorTestWorker {
+    type Task = TestTask;
+    type Output = String;
+    type Error = String;
+
+    async fn process(_: Self::Task) -> Response<Self> {
+        Response::Complete(Err("simulated error".to_string()))
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use std::sync::mpsc;
-
     use super::*;
     use supervisor::Supervisor;
 
@@ -57,6 +69,25 @@ mod test {
         // This task does not get processed yet as the pool size is 1
         pool.enqueue(task).await;
 
+        run(pool).await;
+    }
+
+    #[tokio::test]
+    async fn error_test() {
+        let mut pool: Supervisor<ErrorTestWorker> = Supervisor::new(1);
+
+        let task = TestTask {
+            msg: "hello-world".to_string(),
+        };
+
+        pool.enqueue(task.clone()).await;
+
+        // This task does not get processed yet as the pool size is 1
+        pool.enqueue(task).await;
+        run(pool).await;
+    }
+
+    async fn run<W: Workable + 'static>(mut pool: Supervisor<W>) {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("received shutdown signal");
