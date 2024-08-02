@@ -3,11 +3,14 @@ use crate::{
     worker::{Workable, Worker},
     Pid,
 };
-use std::collections::VecDeque;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    time::Duration,
+};
 
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
 
 // Internal type alias holding the context needed to communicate
@@ -115,7 +118,7 @@ impl<W: Workable + 'static> Supervisor<W> {
                             println!("received msg from worker: {msg:?}");
                         },
                         None => {
-                            eprintln!("no workers running, which should not happen");
+                            eprintln!("no workers running");
                         }
                     }
                 }
@@ -131,30 +134,44 @@ impl<W: Workable + 'static> Supervisor<W> {
         // Emit a cancellation message and wait for all the
         // workers to ack or timeout.
         println!("shutting down supervisor");
-        let mut shutdowns = JoinSet::new();
-        let checked_len = self.checked.capacity();
 
-        for worker in self.checked.into_iter() {
-            shutdowns.spawn(async move { worker.1.send(Request::Shutdown).await });
+        let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = self
+            .pool
+            .into_iter()
+            .chain(self.checked.into_iter())
+            .map(|w| (w.0, (w.1, w.2)))
+            .collect();
+
+        for worker in workers.iter() {
+            let sender = &worker.1 .0; // FIXME(jdb): terrible, but lazy
+            sender
+                .send(Request::Shutdown)
+                .await
+                .expect("unable to send shutdown to worker {worker}");
         }
+
+        let mut timeout = tokio::time::interval(Duration::from_secs(10));
+        timeout.tick().await;
 
         loop {
-            // NOTE(jdb): Add tokio::select! with timeout
-            if let Some(msg) = self.receiver.recv().await {
-                println!("got shutdown ack? {msg:?}");
-            } else {
-                println!("reached end");
+            if workers.is_empty() {
+                println!("all workers have been shutdown");
                 break;
             }
+
+            tokio::select! {
+                msg = self.receiver.recv() => {
+                    if let Some((worker_id, Response::ShutdownAck)) = msg {
+                        println!("got shutdown ack from {worker_id}");
+                        workers.remove(&worker_id);
+                    }
+                },
+                _ = timeout.tick() => {
+                    eprintln!("shutdown timeout elapsed, one or more workers may remain in an inconsistent state");
+                    break;
+                }
+            }
         }
-
-        let mut results = Vec::with_capacity(checked_len);
-
-        while let Some(result) = shutdowns.join_next().await {
-            results.push(result);
-        }
-
-        println!("shutdown result {results:?}");
     }
 }
 
