@@ -64,10 +64,10 @@ mod test {
             msg: "hello-world".to_string(),
         };
 
-        pool.enqueue(task.clone()).await;
+        pool.enqueue(task.clone()).await.unwrap();
 
         // This task does not get processed yet as the pool size is 1
-        pool.enqueue(task).await;
+        pool.enqueue(task).await.unwrap();
 
         run(pool).await;
     }
@@ -80,10 +80,31 @@ mod test {
             msg: "hello-world".to_string(),
         };
 
-        pool.enqueue(task.clone()).await;
+        pool.enqueue(task.clone()).await.unwrap();
 
         // This task does not get processed yet as the pool size is 1
-        pool.enqueue(task).await;
+        pool.enqueue(task).await.unwrap();
+        run(pool).await;
+    }
+
+    #[tokio::test]
+    async fn multiple_worker_test() {
+        // impl Workable for TestWorker {}
+        //
+        // let worker: Worker<TestWorker> = Worker::new(1, tx, rx);
+        let mut pool: Supervisor<TestWorker> = Supervisor::new(4);
+
+        let task = TestTask {
+            msg: "hello-world".to_string(),
+        };
+
+        pool.enqueue(task.clone()).await.unwrap();
+        pool.enqueue(task.clone()).await.unwrap();
+        pool.enqueue(task.clone()).await.unwrap();
+
+        // This task does not get processed yet as the pool size is 1
+        pool.enqueue(task).await.unwrap();
+
         run(pool).await;
     }
 

@@ -76,6 +76,7 @@ impl<W: Workable> Worker<W> {
                             }
                             State::Stop => {
                                 let _ = self.tx.send((self.id, Response::ShutdownAck)).await;
+                                return;
                             }
                         }
                     } else {

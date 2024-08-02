@@ -45,7 +45,7 @@ impl<W: Workable + 'static> Supervisor<W> {
         let mut pool = VecDeque::with_capacity(size);
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
-        for id in 0..size {
+        for id in 0..=size {
             let supervisor_tx = supervisor_tx.clone();
             let (tx, rx) = mpsc::channel(1024);
 
@@ -123,12 +123,11 @@ impl<W: Workable + 'static> Supervisor<W> {
         }
     }
 
-    pub async fn enqueue(&mut self, task: W::Task) {
-        // FIXME(jdb): Add internal errors
-        let _ = self.queue.0.send(task).await;
+    pub async fn enqueue(&mut self, task: W::Task) -> Result<(), error::EnqueueError<W::Task>> {
+        Ok(self.queue.0.send(task).await?)
     }
 
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         // Emit a cancellation message and wait for all the
         // workers to ack or timeout.
         println!("shutting down supervisor");
@@ -137,6 +136,16 @@ impl<W: Workable + 'static> Supervisor<W> {
 
         for worker in self.checked.into_iter() {
             shutdowns.spawn(async move { worker.1.send(Request::Shutdown).await });
+        }
+
+        loop {
+            // NOTE(jdb): Add tokio::select! with timeout
+            if let Some(msg) = self.receiver.recv().await {
+                println!("got shutdown ack? {msg:?}");
+            } else {
+                println!("reached end");
+                break;
+            }
         }
 
         let mut results = Vec::with_capacity(checked_len);
@@ -155,6 +164,10 @@ pub mod error {
     use std::error::Error;
     use std::fmt;
 
+    use tokio::sync::mpsc::error::SendError;
+
+    use crate::worker::Task;
+
     /// Error produced by the `Supervisor`
     #[derive(PartialEq, Eq, Clone, Copy)]
     pub struct SupervisorError<T>(pub T);
@@ -172,4 +185,19 @@ pub mod error {
     }
 
     impl<T: fmt::Display> Error for SupervisorError<T> {}
+
+    #[derive(Debug)]
+    pub struct EnqueueError<T: Task>(pub SendError<T>);
+
+    impl<T: Task> From<SendError<T>> for EnqueueError<T> {
+        fn from(value: SendError<T>) -> Self {
+            Self(value)
+        }
+    }
+
+    impl<T: Task + fmt::Debug> fmt::Display for EnqueueError<T> {
+        fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(fmt, "error enqueuing task {self:?}")
+        }
+    }
 }
