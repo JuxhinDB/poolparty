@@ -98,7 +98,8 @@ impl<W: Workable + 'static> Supervisor<W> {
                                 // We should only work with Workers that are available. If the receiver
                                 // has dropped, then we should drop this worker entirely from the pool.
                                 //
-                                // This _couold_ lead to
+                                // This _couold_ lead to some odd situation where a worker is left
+                                // into some intermittent state.
                                 if worker.1.send(msg).await.is_ok() {
                                     // Move the worker to the checked out pool so that the channel
                                     // remains open.
