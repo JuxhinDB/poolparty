@@ -4,8 +4,9 @@ pub mod worker;
 
 use std::fmt::Debug;
 
-use crate::{
+pub use crate::{
     message::Response,
+    supervisor::Supervisor,
     worker::{Task, Workable},
 };
 
@@ -30,8 +31,8 @@ impl Workable for TestWorker {
     type Output = String;
     type Error = String;
 
-    async fn process(task: Self::Task) -> Response<Self> {
-        Response::Complete(Ok(format!("got task {task:?}")))
+    async fn process(task: Self::Task) -> Result<Self::Output, Self::Error> {
+        Ok(format!("got task {task:?}"))
     }
 }
 
@@ -43,8 +44,8 @@ impl Workable for ErrorTestWorker {
     type Output = String;
     type Error = String;
 
-    async fn process(_: Self::Task) -> Response<Self> {
-        Response::Complete(Err("simulated error".to_string()))
+    async fn process(_: Self::Task) -> Result<Self::Output, Self::Error> {
+        Err("simulated error".to_string())
     }
 }
 
@@ -55,9 +56,6 @@ mod test {
 
     #[tokio::test]
     async fn usage_test() {
-        // impl Workable for TestWorker {}
-        //
-        // let worker: Worker<TestWorker> = Worker::new(1, tx, rx);
         let mut pool: Supervisor<TestWorker> = Supervisor::new(1);
 
         let task = TestTask {

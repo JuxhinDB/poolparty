@@ -33,7 +33,7 @@ pub struct Supervisor<W: Workable> {
     checked: VecDeque<WorkerHandle<W>>,
 
     // Queue of Tasks to be sent out.
-    queue: (Sender<W::Task>, Receiver<W::Task>),
+    pub queue: (Sender<W::Task>, Receiver<W::Task>),
 
     // Receiver end of the channel between all workers and the supervisor. This
     // allows workers to emit messages back to the supervisor efficiently.
@@ -125,10 +125,6 @@ impl<W: Workable + 'static> Supervisor<W> {
                 }
             };
         }
-    }
-
-    pub async fn enqueue(&mut self, task: W::Task) -> Result<(), error::EnqueueError<W::Task>> {
-        Ok(self.queue.0.send(task).await?)
     }
 
     pub async fn shutdown(mut self) {

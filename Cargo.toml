@@ -1,8 +1,6 @@
-[package]
-name = "poolparty"
-version = "0.1.0"
-edition = "2021"
-authors = ["Juxhin Dyrmishi Brigjaj<me@digital-horror.com>"]
+[workspace]
+resolver = "2"
+members = [ "examples/url-fetcher",
+    "poolparty",
+]
 
-[dependencies]
-tokio = { version = "1.38.0", features = ["full"] }

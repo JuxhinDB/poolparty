@@ -1,0 +1,11 @@
+[package]
+name = "url-fetcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+poolparty = { path = "../../poolparty/" }
+tokio = { version = "1.38.0", features = ["full"] }
+reqwest = "0.12.5"
+anyhow = "1.0.86"
+ratatui = "0.28.0"

@@ -21,7 +21,7 @@ pub trait Workable: Debug + Send + Sync + Sized {
     type Output: Send + Debug;
     type Error: Send + Debug;
 
-    fn process(task: Self::Task) -> impl Future<Output = Response<Self>> + Send;
+    fn process(task: Self::Task) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 }
 
 pub struct Worker<W: Workable> {
@@ -64,7 +64,7 @@ impl<W: Workable> Worker<W> {
                                 // are no longer able to listen to messages while
                                 // the task is running (important for task
                                 // cancellation).
-                                let result = W::process(task.clone()).await;
+                                let result = Response::Complete(W::process(task.clone()).await);
                                 let _ = self.tx.send((self.id, result)).await;
                             }
                             State::Idle => {
