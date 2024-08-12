@@ -47,7 +47,9 @@ impl<W: Workable> Worker<W> {
                 Some(event) = self.rx.recv() => {
                     println!("received event {event:?}");
 
-                    if let Ok(state) = self.state.next(event) {
+                    match self.state.next(event) {
+                        Ok(state) => {
+
                         // We've successfully transitioned our state and
                         // should handle the transition accordingly. I don't
                         // quite like how the state handling is split up,
@@ -65,6 +67,8 @@ impl<W: Workable> Worker<W> {
                                 // the task is running (important for task
                                 // cancellation).
                                 let result = Response::Complete(W::process(task.clone()).await);
+
+                                self.state = State::Idle;
                                 let _ = self.tx.send((self.id, result)).await;
                             }
                             State::Idle => {
@@ -79,9 +83,12 @@ impl<W: Workable> Worker<W> {
                                 return;
                             }
                         }
-                    } else {
-                        eprintln!("invalid transition");
-                        return;
+
+                        },
+                        Err(e) => {
+                            eprintln!("{e:?}");
+                            return;
+                        }
                     }
                 }
                 else => {
@@ -129,12 +136,14 @@ impl<W: Workable> State<W> {
     //  ensure that we are able to capture error state before terminating a
     //  worker.
     fn next(&self, event: Request<W>) -> Result<State<W>, String> {
-        match (self, event) {
-            (State::Idle, Request::Task(t)) => Ok(State::Running { task: t }),
+        match (self, &event) {
+            (State::Idle, Request::Task(t)) => Ok(State::Running { task: t.clone() }),
             (State::Idle, Request::Cancel) => Ok(State::Idle),
             (State::Running { task: _ }, Request::Cancel) => Ok(State::Idle),
             (_, Request::Shutdown) => Ok(State::Stop),
-            _ => Err("invalid transition".to_string()),
+            _ => Err(format!(
+                "invalid transition, event: {event:?}, state: {self:?}"
+            )),
         }
     }
 }
