@@ -1,6 +1,6 @@
 use crate::worker::Workable;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Request<W: Workable> {
     State,
     Task(W::Task),
