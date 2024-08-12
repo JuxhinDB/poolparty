@@ -23,20 +23,23 @@ type WorkerHandle<W> = (Pid, Sender<Request<W>>, JoinHandle<()>);
 
 #[allow(dead_code)]
 pub struct Supervisor<W: Workable> {
-    // Internal worker pool, containing the queue of workers that are ready
-    // to receive a task (i.e., checkout).
-    pool: VecDeque<WorkerHandle<W>>,
+    /// Internal worker pool, containing the queue of workers that are ready
+    /// to receive a task (i.e., checkout).
+    pool: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
 
-    // An internal pool containing the list of checked out workers. We need
-    // to do this in order to keep channels alive and keep communication with
-    // workers even as they are running.
-    checked: VecDeque<WorkerHandle<W>>,
+    /// An internal pool containing the list of checked out workers. We need
+    /// to do this in order to keep channels alive and keep communication with
+    /// workers even as they are running.
+    checked: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
 
-    // Queue of Tasks to be sent out.
+    /// Pending queue of tasks to be executed
+    tasks: VecDeque<W::Task>,
+
+    /// Queue of Tasks to be sent out.
     pub queue: (Sender<W::Task>, Receiver<W::Task>),
 
-    // Receiver end of the channel between all workers and the supervisor. This
-    // allows workers to emit messages back to the supervisor efficiently.
+    /// Receiver end of the channel between all workers and the supervisor. This
+    /// allows workers to emit messages back to the supervisor efficiently.
     receiver: Receiver<(Pid, Response<W>)>,
 
     size: usize,
@@ -45,7 +48,7 @@ pub struct Supervisor<W: Workable> {
 #[allow(dead_code)]
 impl<W: Workable + 'static> Supervisor<W> {
     pub fn new(size: usize) -> Self {
-        let mut pool = VecDeque::with_capacity(size);
+        let mut pool = BTreeMap::new();
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
         for id in 0..=size {
@@ -56,12 +59,13 @@ impl<W: Workable + 'static> Supervisor<W> {
                 Worker::new(id, supervisor_tx.clone(), rx).run().await;
             });
 
-            pool.push_front((id, tx, handle));
+            pool.insert(id, (tx, handle));
         }
 
         Self {
             pool,
-            checked: VecDeque::with_capacity(size),
+            checked: BTreeMap::new(),
+            tasks: VecDeque::new(),
             queue: mpsc::channel(1024),
             receiver: supervisor_rx,
             size,
@@ -77,49 +81,66 @@ impl<W: Workable + 'static> Supervisor<W> {
         //
         // Dynamically spawn workers if the pool is not at full capacity when
         // tasks are enqueued.
+
+        // In the event that the queue has one or more tasks pending (i.e., due
+        // to not having any available workers), with no new tasks coming in,
+        // we want to ensure that we still periodically check the task queue
+        // given that the pool size of >=0.
+        //
+        // NOTE(jdb): I'd prefer a better alternative to polling the queue
+        // every tick. Some form of notify mechanism may be more suitable.
+        let mut task_queue_interval = tokio::time::interval(Duration::from_millis(250));
+        task_queue_interval.tick().await;
+
         loop {
             tokio::select! {
-                // NOTE(jdb): Consider `biased;` polling to make sure that
-                // noisy workers do not prevent tasks from being enqueued.
-
                 // New task has been enqueued
                 task = self.queue.1.recv() => {
-                    match task {
-                        Some(task) => {
-                            // We want to check if there is a worker available in the pool,
-                            // if not we have two options:
-                            //
-                            // 1. Spawn a new worker if we are within capacity limits;
-                            // 2. Wait until the next worker is available.
-                            if let Some(worker) = self.pool.pop_front() {
-                                // Let's try to find a worker
-                                let msg = Request::Task(task);
+                    if let Some(task) = task {
+                        self.tasks.push_back(task);
+                    } else {
+                        eprintln!("internal task queue closed unexpectedly");
+                    }
+                },
+                // FIXME(jdb): Curently this assumes that the supervisor pool
+                // is pre-allocated with the maximum number of workers. This
+                // shouldn't be the case, as we may need to spawn one or more
+                // workers.
+                _ = task_queue_interval.tick(), if !self.pool.is_empty() && !self.tasks.is_empty() => {
 
-                                // We should only work with Workers that are available. If the receiver
-                                // has dropped, then we should drop this worker entirely from the pool.
-                                //
-                                // This _couold_ lead to some odd situation where a worker is left
-                                // into some intermittent state.
-                                if worker.1.send(msg).await.is_ok() {
-                                    // Move the worker to the checked out pool so that the channel
-                                    // remains open.
-                                    self.checked.push_front(worker);
-                                }
-                            }
-                        },
-                        None => {
-                            eprintln!("internal task queue closed unexpectedly");
+                    // FIXME(jdb): We should aim to allocate as many tasks as
+                    // possible from the task queue to our worker pool. Currently
+                    // we are only allocating one task at a time.
+                    if let (Some(worker), Some(task)) = (self.pool.pop_first(), self.tasks.pop_front()) {
+                        let msg = Request::Task(task);
+
+                        if worker.1.0.send(msg).await.is_ok() {
+                            // Move the worker to the checked out pool so that the channel
+                            // remains open.
+                            self.checked.insert(worker.0, worker.1);
                         }
                     }
                 },
                 // Received a message from one of our workers
                 msg = self.receiver.recv() => {
                     match msg {
-                        Some(msg) => {
-                            println!("received msg from worker: {msg:?}");
+                        Some((pid, Response::Complete(Ok(res)))) => {
+                            println!("received msg from worker: {res:?}");
+
+                            // Place the worker back in the pool
+                            if let Some(worker) = self.checked.remove_entry(&pid) {
+                                self.pool.insert(worker.0, worker.1);
+                            }
                         },
+                        Some((_pid, Response::Complete(Err(err)))) => {
+                            println!("received err from worker: {err:?}");
+                        },
+                        Some(res) => {
+                            println!("received res from worker: {res:?}");
+                        }
                         None => {
-                            eprintln!("no workers running");
+                            panic!("no workers running");
+
                         }
                     }
                 }
@@ -132,12 +153,9 @@ impl<W: Workable + 'static> Supervisor<W> {
         // workers to ack or timeout.
         println!("shutting down supervisor");
 
-        let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = self
-            .pool
-            .into_iter()
-            .chain(self.checked.into_iter())
-            .map(|w| (w.0, (w.1, w.2)))
-            .collect();
+        let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = BTreeMap::new();
+        workers.append(&mut self.pool);
+        workers.append(&mut self.checked);
 
         for worker in workers.iter() {
             let sender = &worker.1 .0; // FIXME(jdb): terrible, but lazy
