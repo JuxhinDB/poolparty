@@ -4,3 +4,7 @@ members = [ "examples/url-fetcher",
     "poolparty",
 ]
 
+[workspace.dependencies]
+tracing = { version = "0.1.40", default-features = false, features = ["attributes"] }
+tracing-subscriber = { version = "0.3.18" }
+tokio = { version = "1.38.0", features = ["full"] }

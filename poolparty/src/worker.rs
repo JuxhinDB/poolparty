@@ -24,6 +24,7 @@ pub trait Workable: Debug + Send + Sync + Sized {
     fn process(task: Self::Task) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 }
 
+#[derive(Debug)]
 pub struct Worker<W: Workable> {
     id: usize,
     tx: Sender<(Pid, Response<W>)>,
@@ -41,11 +42,12 @@ impl<W: Workable> Worker<W> {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(worker_id = self.id))]
     pub async fn run(mut self) {
         loop {
             tokio::select! {
                 Some(event) = self.rx.recv() => {
-                    println!("received event {event:?}");
+                    tracing::trace!("received event {event:?}");
 
                     match self.state.next(event) {
                         Ok(state) => {
@@ -57,7 +59,7 @@ impl<W: Workable> Worker<W> {
                         // we make it fast/pretty.
                         self.state = state;
 
-                        println!("transitioned to state {state:?}", state = self.state);
+                        tracing::trace!("transitioned to state {state:?}", state = self.state);
                         match &self.state {
                             State::Running { task } => {
                                 // FIXME(jdb): Right now this blocks the state
@@ -76,9 +78,10 @@ impl<W: Workable> Worker<W> {
                             }
                             State::Error(err) => {
                                 // Something bad happened
-                                eprintln!("error during execution: {err:?}");
+                                tracing::error!("error during execution: {err:?}");
                             }
                             State::Stop => {
+                                tracing::debug!("received shutdown signal from supervisor");
                                 let _ = self.tx.send((self.id, Response::ShutdownAck)).await;
                                 return;
                             }
@@ -86,13 +89,13 @@ impl<W: Workable> Worker<W> {
 
                         },
                         Err(e) => {
-                            eprintln!("{e:?}");
+                            tracing::error!("state transition error: {e:?}");
                             return;
                         }
                     }
                 }
                 else => {
-                    eprintln!("worker channel closed: shutting down");
+                    tracing::error!("worker channel closed: shutting down");
                     break;
                 }
             }

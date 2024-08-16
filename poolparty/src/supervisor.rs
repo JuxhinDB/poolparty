@@ -13,15 +13,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-// Internal type alias holding the context needed to communicate
-// as well as abort tasks.
-//
-// NOTE(jdb): It's unclear, design-wise, if we want to rely on the tokio
-// `JoinHandle`. This will make running workers across network much more
-// difficult and goes against the design-idea of the library.
-type WorkerHandle<W> = (Pid, Sender<Request<W>>, JoinHandle<()>);
-
-#[allow(dead_code)]
+#[derive(Debug)]
 pub struct Supervisor<W: Workable> {
     /// Internal worker pool, containing the queue of workers that are ready
     /// to receive a task (i.e., checkout).
@@ -41,17 +33,14 @@ pub struct Supervisor<W: Workable> {
     /// Receiver end of the channel between all workers and the supervisor. This
     /// allows workers to emit messages back to the supervisor efficiently.
     receiver: Receiver<(Pid, Response<W>)>,
-
-    size: usize,
 }
 
-#[allow(dead_code)]
 impl<W: Workable + 'static> Supervisor<W> {
     pub fn new(size: usize) -> Self {
         let mut pool = BTreeMap::new();
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
-        for id in 0..=size {
+        for id in 0..size {
             let supervisor_tx = supervisor_tx.clone();
             let (tx, rx) = mpsc::channel(1024);
 
@@ -68,10 +57,10 @@ impl<W: Workable + 'static> Supervisor<W> {
             tasks: VecDeque::new(),
             queue: mpsc::channel(1024),
             receiver: supervisor_rx,
-            size,
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) {
         // Start running the supervisor manage worker lifecycle
         //
@@ -81,6 +70,7 @@ impl<W: Workable + 'static> Supervisor<W> {
         //
         // Dynamically spawn workers if the pool is not at full capacity when
         // tasks are enqueued.
+        tracing::info!("starting supervisor...");
 
         // In the event that the queue has one or more tasks pending (i.e., due
         // to not having any available workers), with no new tasks coming in,
@@ -97,9 +87,10 @@ impl<W: Workable + 'static> Supervisor<W> {
                 // New task has been enqueued
                 task = self.queue.1.recv() => {
                     if let Some(task) = task {
+                        tracing::trace!("enqueuing task {task:?}");
                         self.tasks.push_back(task);
                     } else {
-                        eprintln!("internal task queue closed unexpectedly");
+                        tracing::error!("internal task queue closed unexpectedly");
                     }
                 },
                 // FIXME(jdb): Curently this assumes that the supervisor pool
@@ -107,7 +98,6 @@ impl<W: Workable + 'static> Supervisor<W> {
                 // shouldn't be the case, as we may need to spawn one or more
                 // workers.
                 _ = task_queue_interval.tick(), if !self.pool.is_empty() && !self.tasks.is_empty() => {
-
                     // FIXME(jdb): We should aim to allocate as many tasks as
                     // possible from the task queue to our worker pool. Currently
                     // we are only allocating one task at a time.
@@ -125,7 +115,7 @@ impl<W: Workable + 'static> Supervisor<W> {
                 msg = self.receiver.recv() => {
                     match msg {
                         Some((pid, Response::Complete(Ok(res)))) => {
-                            println!("received msg from worker: {res:?}");
+                            tracing::trace!("received msg from worker: {res:?}");
 
                             // Place the worker back in the pool
                             if let Some(worker) = self.checked.remove_entry(&pid) {
@@ -133,14 +123,13 @@ impl<W: Workable + 'static> Supervisor<W> {
                             }
                         },
                         Some((_pid, Response::Complete(Err(err)))) => {
-                            println!("received err from worker: {err:?}");
+                            tracing::info!("received err from worker: {err:?}");
                         },
                         Some(res) => {
-                            println!("received res from worker: {res:?}");
+                            tracing::debug!("received res from worker: {res:?}");
                         }
                         None => {
                             panic!("no workers running");
-
                         }
                     }
                 }
@@ -148,10 +137,17 @@ impl<W: Workable + 'static> Supervisor<W> {
         }
     }
 
+    #[tracing::instrument(skip(self),
+        fields(
+            pending_tasks = self.tasks.len(),
+            workers_in_pool = self.pool.len(),
+            checked_in_workers = self.checked.len(),
+        )
+    )]
     pub async fn shutdown(mut self) {
         // Emit a cancellation message and wait for all the
         // workers to ack or timeout.
-        println!("shutting down supervisor");
+        tracing::info!("shutting down supervisor");
 
         let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = BTreeMap::new();
         workers.append(&mut self.pool);
@@ -170,19 +166,19 @@ impl<W: Workable + 'static> Supervisor<W> {
 
         loop {
             if workers.is_empty() {
-                println!("all workers have been shutdown");
+                tracing::debug!("all workers have been shut down");
                 break;
             }
 
             tokio::select! {
                 msg = self.receiver.recv() => {
                     if let Some((worker_id, Response::ShutdownAck)) = msg {
-                        println!("got shutdown ack from {worker_id}");
+                        tracing::debug!("got shutdown ack from {worker_id}");
                         workers.remove(&worker_id);
                     }
                 },
                 _ = timeout.tick() => {
-                    eprintln!("shutdown timeout elapsed, one or more workers may remain in an inconsistent state");
+                    tracing::error!("shutdown timeout elapsed, one or more workers may remain in an inconsistent state");
                     break;
                 }
             }
