@@ -3,7 +3,8 @@ use reqwest::{StatusCode, Url};
 
 use anyhow::Context;
 
-use std::io;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Debug, Clone)]
 struct UrlFetchTask {
@@ -41,33 +42,42 @@ impl Workable for UrlFetchWorker {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(EnvFilter::from_default_env())
+        .init();
+
+    tracing::info!("starting url-fetch example...");
+
     let mut supervisor: Supervisor<UrlFetchWorker> = Supervisor::new(5);
     let queue_tx = supervisor.queue.0.clone();
 
-    tokio::spawn(async move {
-        supervisor.run().await;
-    });
+    tokio::select! {
+        _ = input_loop(queue_tx) => {},
+        _ = supervisor.run() => {},
+        _ = tokio::signal::ctrl_c() => {
+            supervisor.shutdown().await;
+            return Ok(());
+        }
+    }
 
+    Ok(())
+}
+
+async fn input_loop(tx: tokio::sync::mpsc::Sender<UrlFetchTask>) {
     loop {
-        if let Some(input) = get_input() {
+        println!("Enter a url you'd like to enqueue a url fetch task for: ");
+        let mut reader = BufReader::new(tokio::io::stdin());
+        let mut input = String::new();
+
+        if reader.read_line(&mut input).await.is_ok() {
             let task = UrlFetchTask {
-                url: input.parse().expect("invalid url"),
+                url: input.trim().to_string().parse().expect("invalid url"),
             };
 
             for _ in 0..=100 {
-                let _ = queue_tx.send(task.clone()).await;
+                let _ = tx.send(task.clone()).await;
             }
         }
-    }
-}
-
-fn get_input() -> Option<String> {
-    println!("Enter a url you'd like to enqueue a url fetch for: ");
-    let mut input = String::new();
-
-    if io::stdin().read_line(&mut input).is_ok() {
-        Some(input.trim().to_string())
-    } else {
-        None
     }
 }
