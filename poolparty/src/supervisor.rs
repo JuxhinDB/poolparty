@@ -1,4 +1,5 @@
 use crate::{
+    buffer::RingBuffer,
     message::{Request, Response},
     worker::{Workable, Worker},
     Pid,
@@ -30,6 +31,9 @@ pub struct Supervisor<W: Workable> {
     /// Queue of Tasks to be sent out.
     pub queue: (Sender<W::Task>, Receiver<W::Task>),
 
+    /// Buffer of worker results
+    pub results: RingBuffer<Result<W::Output, W::Error>>,
+
     /// Receiver end of the channel between all workers and the supervisor. This
     /// allows workers to emit messages back to the supervisor efficiently.
     receiver: Receiver<(Pid, Response<W>)>,
@@ -56,6 +60,7 @@ impl<W: Workable + 'static> Supervisor<W> {
             checked: BTreeMap::new(),
             tasks: VecDeque::new(),
             queue: mpsc::channel(1024),
+            results: RingBuffer::new(),
             receiver: supervisor_rx,
         }
     }
@@ -114,8 +119,12 @@ impl<W: Workable + 'static> Supervisor<W> {
                 // Received a message from one of our workers
                 msg = self.receiver.recv() => {
                     match msg {
-                        Some((pid, Response::Complete(Ok(res)))) => {
+                        Some((pid, Response::Complete(res))) => {
                             tracing::trace!("received msg from worker: {res:?}");
+
+                            if let Err(e) = self.results.push(res) {
+                                tracing::error!("error pushing worker result to ring buffer: {e:?}");
+                            }
 
                             // Place the worker back in the pool
                             if let Some(worker) = self.checked.remove_entry(&pid) {
@@ -188,9 +197,7 @@ impl<W: Workable + 'static> Supervisor<W> {
 
 pub mod error {
     //! Supervisor related errors
-
-    use std::error::Error;
-    use std::fmt;
+    use std::{error::Error, fmt};
 
     use tokio::sync::mpsc::error::SendError;
 
