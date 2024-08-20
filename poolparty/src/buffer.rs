@@ -9,7 +9,7 @@ use std::{collections::VecDeque, ops::DerefMut, sync::Mutex};
 use tokio::sync::Notify;
 
 #[derive(Debug)]
-pub(crate) struct RingBuffer<T> {
+pub struct RingBuffer<T> {
     // FIXME(jdb): Make this inner buffer bounded
     inner: Mutex<VecDeque<T>>,
     notify: Notify,
@@ -71,7 +71,7 @@ impl<T> RingBuffer<T> {
     }
 }
 
-mod error {
+pub(crate) mod error {
 
     use std::{
         collections::VecDeque,

@@ -1,4 +1,4 @@
-use poolparty::{Supervisor, Task, Workable};
+use poolparty::{supervisor::SupervisorView, Supervisor, Task, Workable};
 use reqwest::{StatusCode, Url};
 
 use anyhow::Context;
@@ -49,20 +49,29 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("starting url-fetch example...");
 
-    let mut supervisor: Supervisor<UrlFetchWorker> = Supervisor::new(5);
+    let mut s: Supervisor<UrlFetchWorker> = Supervisor::new(5);
+    let mut supervisor = SupervisorView {
+        pool: &mut s.pool,
+        checked: &mut s.checked,
+        tasks: &mut s.tasks,
+        queue: &mut s.queue,
+        results: &mut s.results,
+        receiver: &mut s.receiver,
+    };
+
     let queue_tx = supervisor.queue.0.clone();
 
     tokio::select! {
         _ = input_loop(queue_tx) => {},
         _ = supervisor.run() => {},
-        _ = supervisor.results.recv() => {
+        _ = supervisor.recv() => {
             todo!()
         }
         _ = tokio::signal::ctrl_c() => {
-            //supervisor.shutdown().await;
-            return Ok(());
         },
     }
+
+    supervisor.shutdown().await;
 
     Ok(())
 }

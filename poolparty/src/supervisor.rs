@@ -19,15 +19,15 @@ use tokio::{
 pub struct Supervisor<W: Workable> {
     /// Internal worker pool, containing the queue of workers that are ready
     /// to receive a task (i.e., checkout).
-    pool: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+    pub pool: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
 
     /// An internal pool containing the list of checked out workers. We need
     /// to do this in order to keep channels alive and keep communication with
     /// workers even as they are running.
-    checked: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+    pub checked: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
 
     /// Pending queue of tasks to be executed
-    tasks: VecDeque<W::Task>,
+    pub tasks: VecDeque<W::Task>,
 
     /// Queue of Tasks to be sent out.
     pub queue: (Sender<W::Task>, Receiver<W::Task>),
@@ -37,7 +37,29 @@ pub struct Supervisor<W: Workable> {
 
     /// Receiver end of the channel between all workers and the supervisor. This
     /// allows workers to emit messages back to the supervisor efficiently.
-    receiver: Receiver<(Pid, Response<W>)>,
+    pub receiver: Receiver<(Pid, Response<W>)>,
+}
+
+pub struct SupervisorView<'me, W: Workable> {
+    pub pool: &'me mut BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+
+    /// An internal pool containing the list of checked out workers. We need
+    /// to do this in order to keep channels alive and keep communication with
+    /// workers even as they are running.
+    pub checked: &'me mut BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+
+    /// Pending queue of tasks to be executed
+    pub tasks: &'me mut VecDeque<W::Task>,
+
+    /// Queue of Tasks to be sent out.
+    pub queue: &'me mut (Sender<W::Task>, Receiver<W::Task>),
+
+    /// Buffer of worker results
+    pub results: &'me mut RingBuffer<Result<W::Output, W::Error>>,
+
+    /// Receiver end of the channel between all workers and the supervisor. This
+    /// allows workers to emit messages back to the supervisor efficiently.
+    pub receiver: &'me mut Receiver<(Pid, Response<W>)>,
 }
 
 impl<W: Workable + 'static> Supervisor<W> {
@@ -65,7 +87,9 @@ impl<W: Workable + 'static> Supervisor<W> {
             receiver: supervisor_rx,
         }
     }
+}
 
+impl<'me, W: Workable + 'static> SupervisorView<'me, W> {
     #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) {
         // Start running the supervisor manage worker lifecycle
@@ -144,21 +168,26 @@ impl<W: Workable + 'static> Supervisor<W> {
         }
     }
 
+    pub async fn recv(&self) -> VecDeque<Result<W::Output, W::Error>> {
+        // FIXME(jdb): Clean up
+        self.results.recv().await.unwrap()
+    }
+
     #[tracing::instrument(skip(self),
-        fields(
-            pending_tasks = self.tasks.len(),
-            workers_in_pool = self.pool.len(),
-            checked_in_workers = self.checked.len(),
-        )
-    )]
-    pub async fn shutdown(mut self) {
+    fields(
+        pending_tasks = self.tasks.len(),
+        workers_in_pool = self.pool.len(),
+        checked_in_workers = self.checked.len(),
+    )
+)]
+    pub async fn shutdown(self) {
         // Emit a cancellation message and wait for all the
         // workers to ack or timeout.
         tracing::info!("shutting down supervisor");
 
         let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = BTreeMap::new();
-        workers.append(&mut self.pool);
-        workers.append(&mut self.checked);
+        workers.append(self.pool);
+        workers.append(self.checked);
 
         for worker in workers.iter() {
             let sender = &worker.1 .0; // FIXME(jdb): terrible, but lazy
