@@ -4,6 +4,7 @@ use crate::{
     worker::{Workable, Worker},
     Pid,
 };
+
 use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,
@@ -130,9 +131,6 @@ impl<W: Workable + 'static> Supervisor<W> {
                             if let Some(worker) = self.checked.remove_entry(&pid) {
                                 self.pool.insert(worker.0, worker.1);
                             }
-                        },
-                        Some((_pid, Response::Complete(Err(err)))) => {
-                            tracing::info!("received err from worker: {err:?}");
                         },
                         Some(res) => {
                             tracing::debug!("received res from worker: {res:?}");

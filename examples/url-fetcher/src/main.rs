@@ -55,10 +55,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         _ = input_loop(queue_tx) => {},
         _ = supervisor.run() => {},
-        _ = tokio::signal::ctrl_c() => {
-            supervisor.shutdown().await;
-            return Ok(());
+        _ = supervisor.results.recv() => {
+            todo!()
         }
+        _ = tokio::signal::ctrl_c() => {
+            //supervisor.shutdown().await;
+            return Ok(());
+        },
     }
 
     Ok(())
