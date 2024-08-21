@@ -8,7 +8,7 @@ use error::RingBufferError;
 use std::{collections::VecDeque, ops::DerefMut, sync::Mutex};
 use tokio::sync::Notify;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RingBuffer<T> {
     // FIXME(jdb): Make this inner buffer bounded
     inner: Mutex<VecDeque<T>>,
@@ -27,7 +27,7 @@ impl<T> RingBuffer<T> {
         self.inner.lock()?.push_back(value);
 
         // Notify all the waiters that a new value is available
-        self.notify.notify_waiters();
+        self.notify.notify_one();
 
         Ok(())
     }
@@ -56,12 +56,6 @@ impl<T> RingBuffer<T> {
 
             if !values.is_empty() {
                 return Ok(values);
-            } else {
-                tracing::warn!(
-                    "calling of `RingBuffer::recv` resulted in an \
-                    empty buffer. this should not happen as the task is \
-                    notified only when one or more values are available."
-                );
             }
 
             future.as_mut().await;

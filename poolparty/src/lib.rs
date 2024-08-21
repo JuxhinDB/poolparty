@@ -1,4 +1,4 @@
-mod buffer;
+pub mod buffer; // FIXME(jdb): Make this private
 pub mod message;
 pub mod supervisor;
 pub mod worker;

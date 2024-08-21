@@ -1,4 +1,4 @@
-use poolparty::{supervisor::SupervisorView, Supervisor, Task, Workable};
+use poolparty::{buffer::RingBuffer, Supervisor, Task, Workable};
 use reqwest::{StatusCode, Url};
 
 use anyhow::Context;
@@ -49,31 +49,26 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("starting url-fetch example...");
 
-    let mut s: Supervisor<UrlFetchWorker> = Supervisor::new(5);
-    let mut supervisor = SupervisorView {
-        pool: &mut s.pool,
-        checked: &mut s.checked,
-        tasks: &mut s.tasks,
-        queue: &mut s.queue,
-        results: &mut s.results,
-        receiver: &mut s.receiver,
-    };
+    let buffer = RingBuffer::new();
+    let mut supervisor: Supervisor<UrlFetchWorker> = Supervisor::new(5, &buffer);
 
     let queue_tx = supervisor.queue.0.clone();
 
-    tokio::select! {
-        _ = input_loop(queue_tx) => {},
-        _ = supervisor.run() => {},
-        _ = supervisor.recv() => {
-            todo!()
+    loop {
+        let queue_tx = queue_tx.clone();
+
+        tokio::select! {
+            _ = input_loop(queue_tx) => {},
+            _ = supervisor.run() => {},
+            result = buffer.recv() => {
+                println!("received a result {result:?}");
+            }
+            _ = tokio::signal::ctrl_c() => {
+                supervisor.shutdown().await;
+                return Ok(());
+            },
         }
-        _ = tokio::signal::ctrl_c() => {
-        },
     }
-
-    supervisor.shutdown().await;
-
-    Ok(())
 }
 
 async fn input_loop(tx: tokio::sync::mpsc::Sender<UrlFetchTask>) {
