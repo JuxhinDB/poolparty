@@ -52,39 +52,35 @@ async fn main() -> anyhow::Result<()> {
     let buffer = RingBuffer::new();
     let mut supervisor: Supervisor<UrlFetchWorker> = Supervisor::new(5, &buffer);
 
-    let queue_tx = supervisor.queue.0.clone();
+    println!("Enter a url you'd like to enqueue a url fetch task for: ");
+    let mut reader = BufReader::new(tokio::io::stdin());
+    let mut input = String::new();
 
-    loop {
-        let queue_tx = queue_tx.clone();
+    if reader.read_line(&mut input).await.is_ok() {
+        let task = UrlFetchTask {
+            url: input.trim().to_string().parse().expect("invalid url"),
+        };
 
-        tokio::select! {
-            _ = input_loop(queue_tx) => {},
-            _ = supervisor.run() => {},
-            result = buffer.recv() => {
-                println!("received a result {result:?}");
-            }
-            _ = tokio::signal::ctrl_c() => {
-                supervisor.shutdown().await;
-                return Ok(());
-            },
+        for _ in 0..=10 {
+            let _ = supervisor.queue.0.send(task.clone()).await;
         }
     }
+
+    tokio::select! {
+        _ = supervisor.run() => {},
+        _ = results(&buffer) => {}
+        _ = tokio::signal::ctrl_c() => {
+            supervisor.shutdown().await;
+            return Ok(());
+        },
+    }
+
+    Ok(())
 }
 
-async fn input_loop(tx: tokio::sync::mpsc::Sender<UrlFetchTask>) {
+async fn results(buffer: &RingBuffer<Result<String, anyhow::Error>>) {
     loop {
-        println!("Enter a url you'd like to enqueue a url fetch task for: ");
-        let mut reader = BufReader::new(tokio::io::stdin());
-        let mut input = String::new();
-
-        if reader.read_line(&mut input).await.is_ok() {
-            let task = UrlFetchTask {
-                url: input.trim().to_string().parse().expect("invalid url"),
-            };
-
-            for _ in 0..=100 {
-                let _ = tx.send(task.clone()).await;
-            }
-        }
+        let msg = buffer.recv().await;
+        println!("received a result {msg:?}");
     }
 }
