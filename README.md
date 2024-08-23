@@ -18,10 +18,10 @@ Each worker operates as a state machine with defined states and transitions, ens
 
 ## Checklist of Features/Functionality
 
-Anything that is marked as "complete" is mostly just mvp/proof-of-concept
+Anything that is marked as "complete" is mostly just mvp/proof-of-concept.
 
 - [x] Basic Worker Pool Structure
-- [ ] Task Queue Implementation
+- [x] Task Queue Implementation
 - [x] Worker State Machine Design
 - [x] Bi-directional Communication between Supervisor and Workers
 - [x] Worker Lifecycle Management (Spawn, Run, Cancel, Stop)
@@ -32,6 +32,20 @@ Anything that is marked as "complete" is mostly just mvp/proof-of-concept
 - [ ] Documentation and Examples
 - [ ] Unit and Integration Tests
 - [ ] Performance Optimization
+
+#### Future goals
+
+There are a couple of major changes I'd like to make if things do progress.
+
+* Refactor communication to purely rpc. This will enable remote-workers, more
+  inline with erlang's distributed, fault-tolerant, scalable systems. It will
+  also do away with existing hacks to get results propagated back to clients.
+
+* Supervisor trees. Right now we are assuming a single supervisor, with a 
+  flat hierarachy of workers. This should change to effectively support a 
+  supervision tree.
+
+Contributions are welcome!
 
 ## Usage
 
@@ -68,4 +82,4 @@ async fn main() {
     pool.enqueue(task).await;
     pool.run().await;
 }
-
+```
