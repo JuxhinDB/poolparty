@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn results(buffer: &RingBuffer<Result<String, anyhow::Error>>) {
+async fn results(buffer: &RingBuffer<Result<String, (anyhow::Error, UrlFetchTask)>>) {
     loop {
         let msg = buffer.recv().await;
         println!("received a result {msg:?}");

@@ -1,5 +1,5 @@
 [package]
-name = "url-fetcher"
+name = "interrmitent-failure"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,5 +9,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "ansi", "env-filter"] }
 
 poolparty = { path = "../../poolparty/" }
-reqwest = "0.12.5"
-anyhow = "1.0.86"
+coinflip = "0.1.1"

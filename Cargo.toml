@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [ "examples/url-fetcher",
+members = [ "examples/interrmitent-failure", "examples/url-fetcher",
     "poolparty",
 ]
 
