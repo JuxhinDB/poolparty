@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 // in order to bypass move issues when matching `self.state` and moving the
 // `State::Running { task }` to `Workable::process`. This needs to be designed
 // better later on.
-pub trait Task: Send + Clone {}
+pub trait Task: Send + Sync + Clone {}
 
 /// A long-lived Worker/Actor that is sent tasks to execute and emit back events
 /// to be handled by the supervisor.
@@ -30,6 +30,16 @@ pub struct Worker<W: Workable> {
     tx: Sender<(Pid, Response<W>)>,
     rx: Receiver<Request<W>>,
     state: State<W>,
+}
+
+impl<W: Workable> Drop for Worker<W> {
+    fn drop(&mut self) {
+        // NOTE(jdb): Perform clean shutdown as recommended by tokio
+        //
+        // https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html#clean-shutdown
+        self.rx.close();
+        while self.rx.try_recv().is_ok() {}
+    }
 }
 
 impl<W: Workable> Worker<W> {
@@ -68,10 +78,17 @@ impl<W: Workable> Worker<W> {
                                 // are no longer able to listen to messages while
                                 // the task is running (important for task
                                 // cancellation).
-                                let result = Response::Complete(W::process(task.clone()).await);
+                                let result = W::process(task.clone()).await;
+
+
+                                let message = match result {
+                                    Ok(result) => Response::Complete(Ok(result)),
+                                    Err(e) => Response::Complete(Err((e, task.clone())))
+                                };
 
                                 self.state = State::Idle;
-                                let _ = self.tx.send((self.id, result)).await;
+                                let _ = self.tx.send((self.id, message)).await;
+
                             }
                             State::Idle => {
                                 // Do nothing, wait for a new task

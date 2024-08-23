@@ -33,7 +33,7 @@ pub struct Supervisor<'buf, W: Workable> {
     pub queue: (Sender<W::Task>, Receiver<W::Task>),
 
     /// Buffer of worker results
-    pub results: &'buf RingBuffer<Result<W::Output, W::Error>>,
+    pub results: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
 
     /// Receiver end of the channel between all workers and the supervisor. This
     /// allows workers to emit messages back to the supervisor efficiently.
@@ -41,7 +41,10 @@ pub struct Supervisor<'buf, W: Workable> {
 }
 
 impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
-    pub fn new(size: usize, buffer: &'buf RingBuffer<Result<W::Output, W::Error>>) -> Self {
+    pub fn new(
+        size: usize,
+        buffer: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
+    ) -> Self {
         let mut pool = BTreeMap::new();
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
@@ -120,17 +123,39 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                 // Received a message from one of our workers
                 msg = self.receiver.recv() => {
                     match msg {
-                        Some((pid, Response::Complete(res))) => {
-                            tracing::debug!("received msg from worker: {res:?}");
+                        Some((pid, Response::Complete(result))) => {
+                            tracing::debug!("received msg from worker: {result:?}");
 
-                            if let Err(e) = self.results.push(res) {
+                            match &result {
+                                Ok(_) => {
+                                    // Place the worker back in the pool
+                                    if let Some(worker) = self.checked.remove_entry(&pid) {
+                                        self.pool.insert(worker.0, worker.1);
+                                    }
+                                },
+                                Err((err, task)) => {
+                                    tracing::info!("received error from worker {pid}, err: {err:?}, retrying task: {task:?}");
+
+                                    // Remove the worker from the checked pool and kill/drop it
+                                    if let Some(worker) = self.checked.remove_entry(&pid) {
+                                        drop(worker);
+                                    }
+
+                                    // Try to place the task back to the front of the queue.
+                                    //
+                                    // NOTE(jdb): It's unclear if pushing to the front of the task
+                                    // queue is the smart strategy here. There is a chance that a
+                                    // broken task definition/state may cause repeated failures.
+                                    //
+                                    // In the future we should keep a retry counter to avoid this.
+                                    self.tasks.push_front(task.to_owned());
+                                }
+                            }
+
+                            if let Err(e) = self.results.push(result) {
                                 tracing::error!("error pushing worker result to ring buffer: {e:?}");
                             }
 
-                            // Place the worker back in the pool
-                            if let Some(worker) = self.checked.remove_entry(&pid) {
-                                self.pool.insert(worker.0, worker.1);
-                            }
                         },
                         Some(res) => {
                             tracing::debug!("received res from worker: {res:?}");
