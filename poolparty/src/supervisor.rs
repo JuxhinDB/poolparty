@@ -35,6 +35,9 @@ pub struct Supervisor<'buf, W: Workable> {
     /// Buffer of worker results
     pub results: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
 
+    /// Sender end, mostly kept here for the time being to simplify spawning.
+    sender: Sender<(Pid, Response<W>)>,
+
     /// Receiver end of the channel between all workers and the supervisor. This
     /// allows workers to emit messages back to the supervisor efficiently.
     receiver: Receiver<(Pid, Response<W>)>,
@@ -45,27 +48,39 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
         size: usize,
         buffer: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
     ) -> Self {
-        let mut pool = BTreeMap::new();
+        let pool = BTreeMap::new();
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
-        for id in 0..size {
-            let supervisor_tx = supervisor_tx.clone();
-            let (tx, rx) = mpsc::channel(1024);
-
-            let handle = tokio::spawn(async move {
-                Worker::new(id, supervisor_tx.clone(), rx).run().await;
-            });
-
-            pool.insert(id, (tx, handle));
-        }
-
-        Self {
+        let mut supervisor = Self {
             pool,
             checked: BTreeMap::new(),
             tasks: VecDeque::new(),
             queue: mpsc::channel(1024),
             results: buffer,
+            sender: supervisor_tx.clone(),
             receiver: supervisor_rx,
+        };
+
+        supervisor.spawn(size);
+
+        supervisor
+    }
+
+    fn spawn(&mut self, n: usize) {
+        let id = uuid::Uuid::new_v4();
+
+        for _ in 0..n {
+            let supervisor_tx = self.sender.clone();
+            let (worker_tx, worker_rx) = mpsc::channel(1024);
+
+            let handle = tokio::spawn(async move {
+                Worker::new(id, supervisor_tx.clone(), worker_rx)
+                    .run()
+                    .await;
+            });
+
+            tracing::info!("spawning worker with id {id}");
+            self.pool.insert(id, (worker_tx, handle));
         }
     }
 
@@ -136,8 +151,12 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                                 Err((err, task)) => {
                                     tracing::info!("received error from worker {pid}, err: {err:?}, retrying task: {task:?}");
 
-                                    // Remove the worker from the checked pool and kill/drop it
+                                    // Remove the worker from the checked pool and kill/drop it.
+                                    //
+                                    // We should then spawn a new worker in the pool to be able to
+                                    // take it's place.
                                     if let Some(worker) = self.checked.remove_entry(&pid) {
+                                        self.spawn(1);
                                         drop(worker);
                                     }
 

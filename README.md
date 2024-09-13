@@ -24,14 +24,12 @@ Anything that is marked as "complete" is mostly just mvp/proof-of-concept.
 - [x] Task Queue Implementation
 - [x] Worker State Machine Design
 - [x] Bi-directional Communication between Supervisor and Workers
-- [x] Worker Lifecycle Management (Spawn, Run, Cancel, Stop)
-- [ ] Error Handling and Recovery
+- [x] Worker Lifecycle Management 
+- [x] Error Handling and Recovery
 - [x] Graceful Shutdown Process
 - [ ] Dynamic Scaling of Worker Pool
 - [ ] Configuration Options for Pool Size and Channel Sizes
-- [ ] Documentation and Examples
-- [ ] Unit and Integration Tests
-- [ ] Performance Optimization
+- [x] Documentation and Examples
 
 #### Future goals
 

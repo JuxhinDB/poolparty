@@ -7,3 +7,4 @@ authors = ["Juxhin Dyrmishi Brigjaj<me@digital-horror.com>"]
 [dependencies]
 tracing = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

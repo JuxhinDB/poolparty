@@ -8,3 +8,4 @@ members = [ "examples/interrmitent-failure", "examples/url-fetcher",
 tracing = { version = "0.1.40", default-features = false, features = ["attributes"] }
 tracing-subscriber = { version = "0.3.18" }
 tokio = { version = "1.38.0", features = ["full"] }
+uuid = { version = "1.10.0", default-features = false }

@@ -26,7 +26,7 @@ pub trait Workable: Debug + Send + Sync + Sized {
 
 #[derive(Debug)]
 pub struct Worker<W: Workable> {
-    id: usize,
+    id: Pid,
     tx: Sender<(Pid, Response<W>)>,
     rx: Receiver<Request<W>>,
     state: State<W>,
@@ -43,7 +43,7 @@ impl<W: Workable> Drop for Worker<W> {
 }
 
 impl<W: Workable> Worker<W> {
-    pub fn new(id: usize, tx: Sender<(Pid, Response<W>)>, rx: Receiver<Request<W>>) -> Self {
+    pub fn new(id: Pid, tx: Sender<(Pid, Response<W>)>, rx: Receiver<Request<W>>) -> Self {
         Self {
             id,
             tx,
@@ -52,7 +52,7 @@ impl<W: Workable> Worker<W> {
         }
     }
 
-    #[tracing::instrument(skip(self), fields(worker_id = self.id))]
+    #[tracing::instrument(skip(self), fields(worker_id = self.id.to_string()))]
     pub async fn run(mut self) {
         loop {
             tokio::select! {
