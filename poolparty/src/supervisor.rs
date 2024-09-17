@@ -1,6 +1,6 @@
 use crate::{
     buffer::RingBuffer,
-    message::{Request, Response},
+    message::{SupervisorMessage, WorkerMessage},
     worker::{Workable, Worker},
     Pid,
 };
@@ -19,12 +19,12 @@ use tokio::{
 pub struct Supervisor<'buf, W: Workable> {
     /// Internal worker pool, containing the queue of workers that are ready
     /// to receive a task (i.e., checkout).
-    pool: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+    pool: BTreeMap<Pid, (Sender<SupervisorMessage<W>>, JoinHandle<()>)>,
 
     /// An internal pool containing the list of checked out workers. We need
     /// to do this in order to keep channels alive and keep communication with
     /// workers even as they are running.
-    checked: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+    checked: BTreeMap<Pid, (Sender<SupervisorMessage<W>>, JoinHandle<()>)>,
 
     /// Pending queue of tasks to be executed
     tasks: VecDeque<W::Task>,
@@ -36,11 +36,11 @@ pub struct Supervisor<'buf, W: Workable> {
     pub results: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
 
     /// Sender end, mostly kept here for the time being to simplify spawning.
-    sender: Sender<(Pid, Response<W>)>,
+    pub sender: Sender<(Pid, WorkerMessage<W>)>,
 
     /// Receiver end of the channel between all workers and the supervisor. This
     /// allows workers to emit messages back to the supervisor efficiently.
-    receiver: Receiver<(Pid, Response<W>)>,
+    receiver: Receiver<(Pid, WorkerMessage<W>)>,
 }
 
 impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
@@ -61,27 +61,7 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
             receiver: supervisor_rx,
         };
 
-        supervisor.spawn(size);
-
         supervisor
-    }
-
-    fn spawn(&mut self, n: usize) {
-        let id = uuid::Uuid::new_v4();
-
-        for _ in 0..n {
-            let supervisor_tx = self.sender.clone();
-            let (worker_tx, worker_rx) = mpsc::channel(1024);
-
-            let handle = tokio::spawn(async move {
-                Worker::new(id, supervisor_tx.clone(), worker_rx)
-                    .run()
-                    .await;
-            });
-
-            tracing::info!("spawning worker with id {id}");
-            self.pool.insert(id, (worker_tx, handle));
-        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -126,7 +106,7 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                     // possible from the task queue to our worker pool. Currently
                     // we are only allocating one task at a time.
                     if let (Some(worker), Some(task)) = (self.pool.pop_first(), self.tasks.pop_front()) {
-                        let msg = Request::Task(task);
+                        let msg = SupervisorMessage::Task(task);
 
                         if worker.1.0.send(msg).await.is_ok() {
                             // Move the worker to the checked out pool so that the channel
@@ -138,7 +118,7 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                 // Received a message from one of our workers
                 msg = self.receiver.recv() => {
                     match msg {
-                        Some((pid, Response::Complete(result))) => {
+                        Some((pid, WorkerMessage::Complete(result))) => {
                             tracing::debug!("received msg from worker: {result:?}");
 
                             match &result {
@@ -151,12 +131,8 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                                 Err((err, task)) => {
                                     tracing::info!("received error from worker {pid}, err: {err:?}, retrying task: {task:?}");
 
-                                    // Remove the worker from the checked pool and kill/drop it.
-                                    //
-                                    // We should then spawn a new worker in the pool to be able to
-                                    // take it's place.
+                                    // Remove the worker from the checked pool and drop it.
                                     if let Some(worker) = self.checked.remove_entry(&pid) {
-                                        self.spawn(1);
                                         drop(worker);
                                     }
 
@@ -176,6 +152,9 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                             }
 
                         },
+                        Some((pid, WorkerMessage::Subscribe)) => {
+                            tracing::info!("worker {pid} attempting to subscribe");
+                        }
                         Some(res) => {
                             tracing::debug!("received res from worker: {res:?}");
                         }
@@ -200,14 +179,15 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
         // workers to ack or timeout.
         tracing::info!("shutting down supervisor");
 
-        let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = BTreeMap::new();
+        let mut workers: BTreeMap<Pid, (Sender<SupervisorMessage<W>>, JoinHandle<()>)> =
+            BTreeMap::new();
         workers.append(&mut self.pool);
         workers.append(&mut self.checked);
 
         for worker in workers.iter() {
             let sender = &worker.1 .0; // FIXME(jdb): terrible, but lazy
             sender
-                .send(Request::Shutdown)
+                .send(SupervisorMessage::Shutdown)
                 .await
                 .expect("unable to send shutdown to worker {worker}");
         }
@@ -223,7 +203,7 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
 
             tokio::select! {
                 msg = self.receiver.recv() => {
-                    if let Some((worker_id, Response::ShutdownAck)) = msg {
+                    if let Some((worker_id, WorkerMessage::ShutdownAck)) = msg {
                         tracing::debug!("got shutdown ack from {worker_id}");
                         workers.remove(&worker_id);
                     }
