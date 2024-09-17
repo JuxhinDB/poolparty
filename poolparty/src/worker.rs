@@ -1,7 +1,7 @@
 use std::{fmt::Debug, future::Future};
 
 use crate::{
-    message::{Request, Response},
+    message::{SupervisorMessage, WorkerMessage},
     Pid,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -26,9 +26,9 @@ pub trait Workable: Debug + Send + Sync + Sized {
 
 #[derive(Debug)]
 pub struct Worker<W: Workable> {
-    id: Pid,
-    tx: Sender<(Pid, Response<W>)>,
-    rx: Receiver<Request<W>>,
+    pid: Pid,
+    tx: Sender<(Pid, WorkerMessage<W>)>,
+    rx: Receiver<SupervisorMessage<W>>,
     state: State<W>,
 }
 
@@ -43,16 +43,32 @@ impl<W: Workable> Drop for Worker<W> {
 }
 
 impl<W: Workable> Worker<W> {
-    pub fn new(id: Pid, tx: Sender<(Pid, Response<W>)>, rx: Receiver<Request<W>>) -> Self {
+    pub async fn new(
+        tx: Sender<(Pid, WorkerMessage<W>)>,
+        rx: Receiver<SupervisorMessage<W>>,
+    ) -> Self {
+        let pid = uuid::Uuid::new_v4();
+
+        // NOTE(jdb): For now we are bootstrapping the subscription to the
+        // supervisor. In the future we would realistically want to:
+        //
+        // 1. Allow the worker to subscribe at a later stage when the client
+        //    decides the worker is ready to `run`;
+        // 2. We would want to chang the subscription to an rpc call. For the
+        //    time being all communication is made through internal channels.
+        tx.send((pid, WorkerMessage::Subscribe))
+            .await
+            .expect("fatal error subscribing to supervisor, is the supervisor dropped?");
+
         Self {
-            id,
+            pid,
             tx,
             rx,
             state: State::Idle,
         }
     }
 
-    #[tracing::instrument(skip(self), fields(worker_id = self.id.to_string()))]
+    #[tracing::instrument(skip(self), fields(worker_id = self.pid.to_string()))]
     pub async fn run(mut self) {
         loop {
             tokio::select! {
@@ -82,12 +98,12 @@ impl<W: Workable> Worker<W> {
 
 
                                 let message = match result {
-                                    Ok(result) => Response::Complete(Ok(result)),
-                                    Err(e) => Response::Complete(Err((e, task.clone())))
+                                    Ok(result) => WorkerMessage::Complete(Ok(result)),
+                                    Err(e) => WorkerMessage::Complete(Err((e, task.clone())))
                                 };
 
                                 self.state = State::Idle;
-                                let _ = self.tx.send((self.id, message)).await;
+                                let _ = self.tx.send((self.pid, message)).await;
 
                             }
                             State::Idle => {
@@ -99,7 +115,7 @@ impl<W: Workable> Worker<W> {
                             }
                             State::Stop => {
                                 tracing::debug!("received shutdown signal from supervisor");
-                                let _ = self.tx.send((self.id, Response::ShutdownAck)).await;
+                                let _ = self.tx.send((self.pid, WorkerMessage::ShutdownAck)).await;
                                 return;
                             }
                         }
@@ -155,12 +171,12 @@ impl<W: Workable> State<W> {
     //  the worker, and spawn a new one with the same task. This is done to
     //  ensure that we are able to capture error state before terminating a
     //  worker.
-    fn next(&self, event: Request<W>) -> Result<State<W>, String> {
+    fn next(&self, event: SupervisorMessage<W>) -> Result<State<W>, String> {
         match (self, &event) {
-            (State::Idle, Request::Task(t)) => Ok(State::Running { task: t.clone() }),
-            (State::Idle, Request::Cancel) => Ok(State::Idle),
-            (State::Running { task: _ }, Request::Cancel) => Ok(State::Idle),
-            (_, Request::Shutdown) => Ok(State::Stop),
+            (State::Idle, SupervisorMessage::Task(t)) => Ok(State::Running { task: t.clone() }),
+            (State::Idle, SupervisorMessage::Cancel) => Ok(State::Idle),
+            (State::Running { task: _ }, SupervisorMessage::Cancel) => Ok(State::Idle),
+            (_, SupervisorMessage::Shutdown) => Ok(State::Stop),
             _ => Err(format!(
                 "invalid transition, event: {event:?}, state: {self:?}"
             )),

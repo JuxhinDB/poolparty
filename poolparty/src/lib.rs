@@ -4,7 +4,7 @@ pub mod supervisor;
 pub mod worker;
 
 pub use crate::{
-    message::Response,
+    message::WorkerMessage,
     supervisor::Supervisor,
     worker::{Task, Workable},
 };
