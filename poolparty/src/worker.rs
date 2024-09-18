@@ -1,10 +1,11 @@
 use std::{fmt::Debug, future::Future};
 
+use tokio::sync::mpsc::{Receiver, Sender};
+
 use crate::{
     message::{Request, Response},
     Pid,
 };
-use tokio::sync::mpsc::{Receiver, Sender};
 
 // NOTE(jdb): `Clone` bound _seems_ unnecessary. I'm currently including this
 // in order to bypass move issues when matching `self.state` and moving the
@@ -171,8 +172,7 @@ impl<W: Workable> State<W> {
 pub mod error {
     //! Worker related errors
 
-    use std::error::Error;
-    use std::fmt;
+    use std::{error::Error, fmt};
 
     /// Error produced by the `Worker`
     #[derive(PartialEq, Eq, Clone, Copy)]

@@ -1,30 +1,41 @@
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroUsize,
+    time::Duration,
+};
+
+use error::SupervisorError;
+use tokio::{
+    sync::mpsc::{self, Receiver, Sender},
+    task::JoinHandle,
+};
+
 use crate::{
+    bounded_map::BoundedBTreeMap,
     buffer::RingBuffer,
     message::{Request, Response},
     worker::{Workable, Worker},
     Pid,
 };
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    time::Duration,
-};
+// Convenient type-alias to avoid overly complex types
+#[allow(type_alias_bounds)]
+type ResultRingBuffer<W: Workable> = RingBuffer<Result<W::Output, (W::Error, W::Task)>>;
 
-use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
-    task::JoinHandle,
-};
+// Convenient type-alias storing the worker ctx for the supervisor containing
+// the sender and task handle.
+type WorkerCtx<W: Workable> = (Sender<Request<W>>, JoinHandle<()>);
 
 #[derive(Debug)]
 pub struct Supervisor<'buf, W: Workable> {
     /// Internal worker pool, containing the queue of workers that are ready
     /// to receive a task (i.e., checkout).
-    pool: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+    pool: BoundedBTreeMap<Pid, WorkerCtx<W>>,
 
     /// An internal pool containing the list of checked out workers. We need
     /// to do this in order to keep channels alive and keep communication with
     /// workers even as they are running.
-    checked: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)>,
+    checked: BoundedBTreeMap<Pid, WorkerCtx<W>>,
 
     /// Pending queue of tasks to be executed
     tasks: VecDeque<W::Task>,
@@ -33,7 +44,7 @@ pub struct Supervisor<'buf, W: Workable> {
     pub queue: (Sender<W::Task>, Receiver<W::Task>),
 
     /// Buffer of worker results
-    pub results: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
+    pub results: &'buf ResultRingBuffer<W>,
 
     /// Sender end, mostly kept here for the time being to simplify spawning.
     sender: Sender<(Pid, Response<W>)>,
@@ -44,16 +55,13 @@ pub struct Supervisor<'buf, W: Workable> {
 }
 
 impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
-    pub fn new(
-        size: usize,
-        buffer: &'buf RingBuffer<Result<W::Output, (W::Error, W::Task)>>,
-    ) -> Self {
-        let pool = BTreeMap::new();
+    pub fn new(size: NonZeroUsize, buffer: &'buf ResultRingBuffer<W>) -> Self {
+        let pool = BoundedBTreeMap::new(size);
         let (supervisor_tx, supervisor_rx) = mpsc::channel(1024);
 
         let mut supervisor = Self {
             pool,
-            checked: BTreeMap::new(),
+            checked: BoundedBTreeMap::new(size),
             tasks: VecDeque::new(),
             queue: mpsc::channel(1024),
             results: buffer,
@@ -61,12 +69,22 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
             receiver: supervisor_rx,
         };
 
-        supervisor.spawn(size);
+        // FIXME(jdb): Remove this, workers should not be spawned on
+        // initialisation of the supervisor
+        supervisor.spawn(size.into()).unwrap();
 
         supervisor
     }
 
-    fn spawn(&mut self, n: usize) {
+    #[tracing::instrument(skip(self),
+        fields(
+            pending_tasks = self.tasks.len(),
+            workers_in_pool = self.pool.len(),
+            checked_in_workers = self.checked.len(),
+            new_workers = n,
+        )
+    )]
+    fn spawn(&mut self, n: usize) -> Result<(), SupervisorError> {
         let id = uuid::Uuid::new_v4();
 
         for _ in 0..n {
@@ -80,8 +98,10 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
             });
 
             tracing::info!("spawning worker with id {id}");
-            self.pool.insert(id, (worker_tx, handle));
+            self.pool.insert(id, (worker_tx, handle))?;
         }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -121,7 +141,7 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                 // is pre-allocated with the maximum number of workers. This
                 // shouldn't be the case, as we may need to spawn one or more
                 // workers.
-                _ = task_queue_interval.tick(), if !self.pool.is_empty() && !self.tasks.is_empty() => {
+                _ = task_queue_interval.tick(), if !self.tasks.is_empty() => {
                     // FIXME(jdb): We should aim to allocate as many tasks as
                     // possible from the task queue to our worker pool. Currently
                     // we are only allocating one task at a time.
@@ -156,7 +176,14 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                                     // We should then spawn a new worker in the pool to be able to
                                     // take it's place.
                                     if let Some(worker) = self.checked.remove_entry(&pid) {
-                                        self.spawn(1);
+                                        let spawn = self.spawn(1);
+                                        if let Err(SupervisorError::CapacityLimit(_)) = spawn {
+                                            tracing::warn!("unable to spawn worker due to reaching pool limit {}", self.pool.len());
+                                        } else if let Err(e) = spawn {
+                                            tracing::error!("error while spawning worker {e:?}");
+                                        }
+
+
                                         drop(worker);
                                     }
 
@@ -172,7 +199,7 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                             }
 
                             if let Err(e) = self.results.push(result) {
-                                tracing::error!("error pushing worker result to ring buffer: {e:?}");
+                                tracing::error!("fatal error pushing worker result to ring buffer: {e:?}");
                             }
 
                         },
@@ -200,7 +227,9 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
         // workers to ack or timeout.
         tracing::info!("shutting down supervisor");
 
-        let mut workers: BTreeMap<Pid, (Sender<Request<W>>, JoinHandle<()>)> = BTreeMap::new();
+        // FIXME(jdb): Clean up this mess
+        let mut workers: BoundedBTreeMap<Pid, WorkerCtx<W>> =
+            BoundedBTreeMap::new(NonZeroUsize::new(self.pool.len() * 2).unwrap());
         workers.append(&mut self.pool);
         workers.append(&mut self.checked);
 
@@ -239,42 +268,27 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
 
 pub mod error {
     //! Supervisor related errors
-    use std::{error::Error, fmt};
+    use std::fmt;
 
-    use tokio::sync::mpsc::error::SendError;
+    use thiserror::Error;
 
-    use crate::worker::Task;
+    use crate::bounded_map;
 
     /// Error produced by the `Supervisor`
-    #[derive(PartialEq, Eq, Clone, Copy)]
-    pub struct SupervisorError<T>(pub T);
+    #[derive(Error, PartialEq, Eq, Clone, Copy)]
+    pub enum SupervisorError {
+        CapacityLimit(#[from] bounded_map::error::BoundedBTreeMapError),
+    }
 
-    impl<T> fmt::Debug for SupervisorError<T> {
+    impl fmt::Debug for SupervisorError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("SupervisorError").finish_non_exhaustive()
         }
     }
 
-    impl<T: fmt::Display> fmt::Display for SupervisorError<T> {
+    impl fmt::Display for SupervisorError {
         fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(fmt, "supervisor error {}", self.0)
-        }
-    }
-
-    impl<T: fmt::Display> Error for SupervisorError<T> {}
-
-    #[derive(Debug)]
-    pub struct EnqueueError<T: Task>(pub SendError<T>);
-
-    impl<T: Task> From<SendError<T>> for EnqueueError<T> {
-        fn from(value: SendError<T>) -> Self {
-            Self(value)
-        }
-    }
-
-    impl<T: Task + fmt::Debug> fmt::Display for EnqueueError<T> {
-        fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(fmt, "error enqueuing task {self:?}")
+            write!(fmt, "SupervisorError {}", self)
         }
     }
 }

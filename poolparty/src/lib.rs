@@ -1,3 +1,4 @@
+mod bounded_map;
 pub mod buffer; // FIXME(jdb): Make this private
 pub mod message;
 pub mod supervisor;

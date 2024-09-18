@@ -4,8 +4,9 @@
 //! The goal is to make it more convenient for downstream clients to consume
 //! from the buffer efficiently.
 
-use error::RingBufferError;
 use std::{collections::VecDeque, ops::DerefMut, sync::Mutex};
+
+use error::RingBufferError;
 use tokio::sync::Notify;
 
 #[derive(Debug, Default)]
