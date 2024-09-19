@@ -64,6 +64,10 @@ impl<T> RingBuffer<T> {
             future.set(self.notify.notified());
         }
     }
+
+    pub fn len(&self) -> Result<usize, RingBufferError<T>> {
+        Ok(self.inner.lock()?.len())
+    }
 }
 
 pub(crate) mod error {

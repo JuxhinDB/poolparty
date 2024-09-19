@@ -1,9 +1,18 @@
-use std::{fmt::Debug, future::Future};
+use std::{
+    fmt::Debug,
+    future::Future,
+};
 
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{
+    Receiver,
+    Sender,
+};
 
 use crate::{
-    message::{Request, Response},
+    message::{
+        Request,
+        Response,
+    },
     Pid,
 };
 
@@ -172,7 +181,10 @@ impl<W: Workable> State<W> {
 pub mod error {
     //! Worker related errors
 
-    use std::{error::Error, fmt};
+    use std::{
+        error::Error,
+        fmt,
+    };
 
     /// Error produced by the `Worker`
     #[derive(PartialEq, Eq, Clone, Copy)]

@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, VecDeque},
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use error::SupervisorError;
 use tokio::{
@@ -24,6 +20,7 @@ type ResultRingBuffer<W: Workable> = RingBuffer<Result<W::Output, (W::Error, W::
 
 // Convenient type-alias storing the worker ctx for the supervisor containing
 // the sender and task handle.
+#[allow(type_alias_bounds)]
 type WorkerCtx<W: Workable> = (Sender<Request<W>>, JoinHandle<()>);
 
 #[derive(Debug)]
@@ -85,9 +82,8 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
         )
     )]
     fn spawn(&mut self, n: usize) -> Result<(), SupervisorError> {
-        let id = uuid::Uuid::new_v4();
-
         for _ in 0..n {
+            let id = uuid::Uuid::new_v4();
             let supervisor_tx = self.sender.clone();
             let (worker_tx, worker_rx) = mpsc::channel(1024);
 
@@ -149,9 +145,11 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                         let msg = Request::Task(task);
 
                         if worker.1.0.send(msg).await.is_ok() {
-                            // Move the worker to the checked out pool so that the channel
-                            // remains open.
-                            self.checked.insert(worker.0, worker.1);
+                            // Move the worker to the checked out pool so that
+                            // the channel remains open.
+                            if let Err(e) = self.checked.insert(worker.0, worker.1) {
+                                tracing::error!("unable to move worker to checked in pool as it has reached capacity: {e}");
+                            }
                         }
                     }
                 },
@@ -159,13 +157,15 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                 msg = self.receiver.recv() => {
                     match msg {
                         Some((pid, Response::Complete(result))) => {
-                            tracing::debug!("received msg from worker: {result:?}");
+                            tracing::debug!("received msg from worker {pid}: {result:?}");
 
                             match &result {
                                 Ok(_) => {
                                     // Place the worker back in the pool
                                     if let Some(worker) = self.checked.remove_entry(&pid) {
-                                        self.pool.insert(worker.0, worker.1);
+                                        if let Err(e) = self.pool.insert(worker.0, worker.1) {
+                                            tracing::error!("unable to place worker back into ready pool as it has reached capacity: {e}");
+                                        }
                                     }
                                 },
                                 Err((err, task)) => {
@@ -203,8 +203,8 @@ impl<'buf, W: Workable + 'static> Supervisor<'buf, W> {
                             }
 
                         },
-                        Some(res) => {
-                            tracing::debug!("received res from worker: {res:?}");
+                        Some((pid, res)) => {
+                            tracing::debug!("received res from worker {pid}: {res:?}");
                         }
                         None => {
                             panic!("no workers running");
@@ -288,7 +288,7 @@ pub mod error {
 
     impl fmt::Display for SupervisorError {
         fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(fmt, "SupervisorError {}", self)
+            write!(fmt, "SupervisorError")
         }
     }
 }

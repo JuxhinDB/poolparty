@@ -7,7 +7,10 @@ pub mod worker;
 pub use crate::{
     message::Response,
     supervisor::Supervisor,
-    worker::{Task, Workable},
+    worker::{
+        Task,
+        Workable,
+    },
 };
 
 // NOTE(jdb): This is just a temporary alias to signal that we want messages

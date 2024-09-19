@@ -1,7 +1,10 @@
 //! Utility `BTreeMap` that is upper-bounded in order to store the supervisor
 //! workers (pool and checked in)
 use std::{
-    collections::{btree_map::Iter, BTreeMap},
+    collections::{
+        btree_map::Iter,
+        BTreeMap,
+    },
     num::NonZeroUsize,
 };
 
@@ -38,6 +41,7 @@ where
         self.inner.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
         self.capacity.into()
     }
@@ -69,7 +73,10 @@ where
 }
 
 pub(crate) mod error {
-    use std::{error::Error, fmt};
+    use std::{
+        error::Error,
+        fmt,
+    };
 
     /// Error produced by the `BoundedBTreeMap`
     #[derive(PartialEq, Eq, Clone, Copy)]
