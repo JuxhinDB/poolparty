@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 use poolparty::{buffer::RingBuffer, Supervisor, Task, Workable};
 use tokio::sync::mpsc::Sender;
@@ -42,7 +42,8 @@ async fn main() -> Result<(), std::io::Error> {
     tracing::info!("starting intermittent-failure example...");
 
     let buffer = RingBuffer::new();
-    let mut supervisor: Supervisor<InterrmitentFailureWorker> = Supervisor::new(5, &buffer);
+    let mut supervisor: Supervisor<InterrmitentFailureWorker> =
+        Supervisor::new(NonZeroUsize::new(5).unwrap(), &buffer);
 
     let queue_tx = supervisor.queue.0.clone();
 
@@ -54,6 +55,8 @@ async fn main() -> Result<(), std::io::Error> {
             return Ok(());
         },
     }
+
+    println!("Got {} results back", buffer.len().unwrap());
 
     Ok(())
 }
@@ -67,5 +70,5 @@ async fn do_work(tx: Sender<InterrmitentFailureTask>) {
 
     // Keep the task running to avoid breaking the select! before
     // any of the work is completed.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
 }

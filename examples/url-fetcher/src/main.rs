@@ -1,10 +1,25 @@
-use poolparty::{buffer::RingBuffer, Supervisor, Task, Workable};
-use reqwest::{StatusCode, Url};
+use std::num::NonZeroUsize;
 
 use anyhow::Context;
-
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use poolparty::{
+    buffer::RingBuffer,
+    Supervisor,
+    Task,
+    Workable,
+};
+use reqwest::{
+    StatusCode,
+    Url,
+};
+use tokio::io::{
+    AsyncBufReadExt,
+    BufReader,
+};
+use tracing_subscriber::{
+    fmt,
+    prelude::*,
+    EnvFilter,
+};
 
 #[derive(Debug, Clone)]
 struct UrlFetchTask {
@@ -50,7 +65,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("starting url-fetch example...");
 
     let buffer = RingBuffer::new();
-    let mut supervisor: Supervisor<UrlFetchWorker> = Supervisor::new(5, &buffer);
+    let mut supervisor: Supervisor<UrlFetchWorker> =
+        Supervisor::new(NonZeroUsize::new(5).unwrap(), &buffer);
 
     println!("Enter a url you'd like to enqueue a url fetch task for: ");
     let mut reader = BufReader::new(tokio::io::stdin());
